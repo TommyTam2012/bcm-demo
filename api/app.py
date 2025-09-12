@@ -29,7 +29,7 @@ DB_PATH = str(APP_DIR / "bcm_demo.db")  # keep DB filename for continuity with e
 
 app = FastAPI(
     title="TAEASLA API",
-    version="1.4.0",
+    version="1.5.0",
     description="TAEASLA backend: courses, enrollments, fees, schedules, HeyGen proxy, and email alerts.",
 )
 
@@ -74,7 +74,8 @@ def init_db():
                 start_date TEXT,
                 end_date TEXT,
                 time TEXT,
-                venue TEXT
+                venue TEXT,
+                seats INTEGER DEFAULT 0
             )
             """
         )
@@ -90,6 +91,7 @@ def init_db():
                 timezone TEXT,
                 notes TEXT,
                 source TEXT,
+                course_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -103,11 +105,6 @@ def init_db():
             )
             """
         )
-
-        # --- Schema migration: add seats column if missing ---
-        if not _column_exists(conn, "courses", "seats"):
-            conn.execute("ALTER TABLE courses ADD COLUMN seats INTEGER DEFAULT 0")
-
         conn.commit()
 
 
@@ -167,7 +164,6 @@ TAEASLA_RULES = (
 
 @app.get("/assistant/intro")
 def assistant_intro():
-    # TAEASLA-only intro
     return {
         "intro": (
             "Hello, I’m the TAEASLA assistant. I can answer about GI fees, summer schedule, "
@@ -340,7 +336,7 @@ async def heygen_interrupt(item: InterruptIn):
 
 # --- Courses model ---
 class CourseIn(BaseModel):
-    name: str = Field(..., description="Course name (e.g., TAEASLA English Level 1)")
+    name: str = Field(..., description="Course name (displayed in Chinese for BCM drop-down)")
     fee: float = Field(..., description="Fee amount (numeric)")
     start_date: Optional[str] = Field(None, description="YYYY-MM-DD")
     end_date: Optional[str] = Field(None, description="YYYY-MM-DD")
@@ -364,18 +360,14 @@ def tts_friendly_time(s: str) -> str:
         "Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday",
         "Thu": "Thursday", "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday",
     }
-    # 1) Replace slashes with comma+space so TTS pauses: Mon/Wed/Fri -> Mon, Wed, Fri
     t = t.replace("/", ", ")
-
-    # 2) Expand English day abbreviations
     for abbr, full in day_map.items():
         t = re.sub(rf"\b{abbr}\b", full, t)
 
-    # 3) Normalize numeric ranges: 7–9pm / 7-9pm -> 7 to 9 pm  (preserve am/pm if present)
     def _range_repl(m):
         start = m.group(1)
         end = m.group(2)
-        ampm = (m.group(3) or "").replace(".", "").lower().strip()  # am/pm/a.m./p.m.
+        ampm = (m.group(3) or "").replace(".", "").lower().strip()
         if ampm in ("am", "pm"):
             return f"{start} {ampm} to {end} {ampm}"
         return f"{start} to {end}"
@@ -386,11 +378,7 @@ def tts_friendly_time(s: str) -> str:
         t,
         flags=re.I,
     )
-
-    # 4) Ensure a space before am/pm if missing: 9pm -> 9 pm
     t = re.sub(r"(\d)(am|pm)\b", r"\1 \2", t, flags=re.I)
-
-    # 5) Collapse any double spaces
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -453,7 +441,7 @@ def courses_summary():
     if row["start_date"] and row["end_date"]:
         parts.append(f"Runs {row['start_date']} to {row['end_date']}.")
     if row["time"]:
-        parts.append(f"Time: {tts_friendly_time(str(row['time']))}.")  # TTS normalized
+        parts.append(f"Time: {tts_friendly_time(str(row['time']))}.")
     if row["venue"]:
         parts.append(f"Venue: {row['venue']}.")
     if "seats" in row.keys() and row["seats"] is not None and int(row["seats"]) > 0:
@@ -527,7 +515,7 @@ def send_enroll_email(name: str, email: str, phone: str, notes: str):
     msg["Subject"] = f"新入学申请通知 - {name}"
     msg["From"] = SMTP_USER
     msg["To"] = SMTP_TO
-    msg["Reply-To"] = email or SMTP_USER  # convenience: replying reaches the student
+    msg["Reply-To"] = email or SMTP_USER
     body = (
         f"您有新的入学申请：\n\n"
         f"学生姓名：{name}\n"
@@ -555,6 +543,7 @@ class EnrollmentIn(BaseModel):
     timezone: Optional[str] = None
     notes: Optional[str] = None
     source: Optional[str] = Field(default="web", description="Where this came from (web/journal/etc)")
+    course_id: Optional[int] = Field(None, description="Selected course ID from drop-down")
 
 
 @app.post("/enroll", tags=["enroll"])
@@ -564,29 +553,41 @@ def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=422, detail="full_name or name is required")
 
     with get_db() as conn:
-        # pick latest course
-        row = conn.execute(
-            "SELECT id, seats FROM courses ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="No course available")
-        current_seats = int(row["seats"] or 0)
+        # Determine which course to enroll into:
+        # 1) If course_id provided, use that
+        # 2) else fallback to latest course
+        if data.course_id:
+            row = conn.execute(
+                "SELECT id, seats FROM courses WHERE id = ?",
+                (int(data.course_id),),
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Selected course not found")
+        else:
+            row = conn.execute(
+                "SELECT id, seats FROM courses ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="No course available")
 
+        current_seats = int(row["seats"] or 0)
         if current_seats <= 0:
             return {"ok": False, "message": "Sorry, this course is full."}
 
         # deduct seat (guard against negative)
-        conn.execute(
+        updated = conn.execute(
             "UPDATE courses SET seats = seats - 1 WHERE id = ? AND seats > 0",
             (row["id"],),
         )
+        if updated.rowcount == 0:
+            return {"ok": False, "message": "Sorry, this course just sold out."}
 
         # record enrollment
         conn.execute(
             """
             INSERT INTO enrollments
-              (full_name, email, phone, program_code, cohort_code, timezone, notes, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              (full_name, email, phone, program_code, cohort_code, timezone, notes, source, course_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 full_name_val,
@@ -597,6 +598,7 @@ def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
                 data.timezone,
                 data.notes,
                 data.source,
+                int(row["id"]),
             ),
         )
         conn.commit()
@@ -610,7 +612,7 @@ def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
         data.notes or ""
     )
 
-    return {"ok": True, "message": "Enrollment confirmed. Seat deducted."}
+    return {"ok": True, "message": "Enrollment confirmed. Seat deducted.", "course_id": int(row["id"])}
 
 
 @app.get("/enrollments/recent", dependencies=[Security(require_admin)], tags=["admin"])
@@ -620,7 +622,7 @@ def recent_enrollments(
 ) -> List[Dict[str, Any]]:
     sql = (
         """
-      SELECT id, full_name, email, phone, program_code, cohort_code, timezone, notes, source, created_at
+      SELECT id, full_name, email, phone, program_code, cohort_code, timezone, notes, source, course_id, created_at
       FROM enrollments
         """
     )
@@ -780,3 +782,62 @@ def stream():
         time.sleep(0.5)
         yield b"data: world\n\n"
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# =========================================================
+# ====== BCM DROP-DOWN SEED + OPTIONS ENDPOINTS ===========
+# =========================================================
+
+# Chinese labels (Traditional) for UI drop-down
+# (Fees set to 0.0 as placeholders; adjust later in Swagger or DB)
+BCM_SEED = [
+    ("自然拼讀", 0.0, 30),          # Phonics
+    ("拼寫", 0.0, 30),              # Spelling
+    ("文法", 0.0, 30),              # Grammar
+    ("青少年雅思", 0.0, 25),        # Junior IELTS
+    ("呈分試", 0.0, 40),            # HK primary/secondary assessment
+    ("香港 Band 1 入學考試", 0.0, 40), # Band1 Entrance Exam
+    ("香港中學文憑試", 0.0, 35),      # HKDSE
+    ("雅思", 0.0, 35),              # IELTS
+    ("托福", 0.0, 35),              # TOEFL
+]
+
+class SeedResult(BaseModel):
+    seeded: int
+    reset: bool
+
+
+@app.post("/courses/seed", response_model=SeedResult, dependencies=[Security(require_admin)], tags=["courses"])
+def seed_courses(reset: bool = Query(True, description="If true, clears and reseeds")):
+    """
+    Seed the course catalog in Chinese for BCM drop-down.
+    You can re-run from Swagger. If reset=True, clears the table first.
+    """
+    with get_db() as conn:
+        if reset:
+            conn.execute("DELETE FROM courses")
+        count = 0
+        for (name_zh, fee, seats) in BCM_SEED:
+            conn.execute(
+                """
+                INSERT INTO courses (name, fee, start_date, end_date, time, venue, seats)
+                VALUES (?, ?, NULL, NULL, NULL, NULL, ?)
+                """,
+                (name_zh, float(fee), int(seats)),
+            )
+            count += 1
+        conn.commit()
+    return SeedResult(seeded=count, reset=bool(reset))
+
+
+@app.get("/courses/options", tags=["courses"])
+def course_options() -> List[Dict[str, Any]]:
+    """
+    Minimal payload for front-end drop-down:
+    [{ id, name, seats }]
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, name, seats FROM courses ORDER BY id ASC"
+        ).fetchall()
+        return [{"id": r["id"], "name": r["name"], "seats": int(r["seats"] or 0)} for r in rows]
