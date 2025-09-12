@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TAEASLA学校入学申请表</title>
-  <meta name="description" content="Simple enrollment form that posts to the BCM API /enroll endpoint." />
+  <meta name="description" content="简易入学申请表：提交到 BCM 的 /enroll 接口。" />
 
   <!-- Basic, clean, centered layout -->
   <style>
@@ -89,34 +89,34 @@
 
       <form id="enrollForm" novalidate>
         <div>
-          <label for="name">Full Name</label>
-          <input id="name" name="name" type="text" placeholder="Jane Doe" required />
+          <label for="name">全名</label>
+          <input id="name" name="name" type="text" placeholder="张三" required />
         </div>
         <div class="row">
           <div>
-            <label for="email">Email</label>
+            <label for="email">电邮</label>
             <input id="email" name="email" type="email" placeholder="you@example.com" required />
           </div>
           <div>
-            <label for="phone">Phone</label>
+            <label for="phone">电话</label>
             <input id="phone" name="phone" type="tel" placeholder="+852 9123 4567" pattern="[+0-9 ()-]{6,}" />
           </div>
         </div>
         <div>
-          <label for="notes">Notes (optional)</label>
-          <textarea id="notes" name="notes" rows="3" placeholder="Anything you’d like us to know?"></textarea>
+          <label for="notes">备注（可选）</label>
+          <textarea id="notes" name="notes" rows="3" placeholder="你想选修哪课程？"></textarea>
         </div>
 
         <div class="actions">
-          <button type="submit">Submit</button>
-          <button class="ghost" type="reset">Clear</button>
-          <span class="small">Posts to your /enroll API.</span>
+          <button type="submit">提交</button>
+          <button class="ghost" type="reset">清除</button>
+          <span class="small">提交到 /enroll 接口</span>
         </div>
         <div id="status" class="msg" role="status" aria-live="polite"></div>
       </form>
 
       <p class="small" style="margin-top:16px">
-        Having issues? Make sure your API is live and CORS is enabled. This page works from a file:// tab too.
+        如遇问题：请确认 API 在线并已启用 CORS。本页在 file:// 本地标签页也可使用。
       </p>
     </div>
   </div>
@@ -153,7 +153,7 @@
       const notes = form.notes.value.trim();
 
       if (!name || !email) {
-        setStatus('Please enter your name and a valid email.', false);
+        setStatus('请输入您的姓名和有效电邮。', false);
         return;
       }
 
@@ -178,12 +178,12 @@
         try { data = await res.json(); } catch { data = await res.text(); }
 
         // Show a friendly confirmation
-        setStatus('✅ Thank you! Your enrollment has been received.', true);
+        setStatus('✅ 谢谢！您的申请已收到。', true);
         form.reset();
         console.log('Enroll success:', data);
       } catch (err) {
         console.error(err);
-        setStatus('❌ Submission failed. Please check your API URL and try again.', false);
+        setStatus('❌ 提交失败。请检查 API 地址后再试。', false);
       }
     });
   </script>
