@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, Security, Request
+from fastapi import FastAPI, HTTPException, Query, Security, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, StreamingResponse, Response
@@ -14,6 +14,8 @@ import time
 import httpx
 import json
 import re  # <-- TTS normalization uses regex
+import ssl, smtplib
+from email.message import EmailMessage
 
 # Optional OpenAI import (safe if package not installed)
 try:
@@ -27,8 +29,8 @@ DB_PATH = str(APP_DIR / "bcm_demo.db")
 
 app = FastAPI(
     title="BCM Demo API",
-    version="1.2.0",
-    description="Backend for BCM demo: courses, enrollments, fees, schedules, and HeyGen token/proxy.",
+    version="1.3.0",
+    description="Backend for BCM demo: courses, enrollments, fees, schedules, and HeyGen token/proxy. Email alerts on enroll.",
 )
 
 # Static files
@@ -502,6 +504,43 @@ def export_courses_csv():
     return Response(content=output.getvalue(), media_type="text/csv")
 
 
+# =========================
+# Email Notification Config
+# =========================
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER = os.getenv("SMTP_USER", "tommytam2012@gmail.com")
+SMTP_PASS = os.getenv("SMTP_PASS")  # <-- Gmail App Password (set in Render)
+SMTP_TO   = os.getenv("SMTP_TO", "tommytam2012@gmail.com")  # where notifications go
+
+def send_enroll_email(name: str, email: str, phone: str, notes: str):
+    """
+    Sends a one-way notification email to the school admin inbox.
+    Fails silently if SMTP_PASS is not configured to avoid breaking the API.
+    """
+    if not SMTP_PASS:
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = f"新入学申请通知 - {name}"
+    msg["From"] = SMTP_USER
+    msg["To"] = SMTP_TO
+    body = (
+        f"您有新的入学申请：\n\n"
+        f"学生姓名：{name}\n"
+        f"电邮：{email or '-'}\n"
+        f"电话：{phone or '-'}\n"
+        f"想选修课程：{notes or '-'}\n\n"
+        f"此邮件由系统自动发送。"
+    )
+    msg.set_content(body)
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context) as server:
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+
+
 # --- Enrollment ---
 class EnrollmentIn(BaseModel):
     full_name: Optional[str] = None
@@ -516,7 +555,7 @@ class EnrollmentIn(BaseModel):
 
 
 @app.post("/enroll", tags=["enroll"])
-def enroll(data: EnrollmentIn):
+def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
     full_name_val = (data.full_name or data.name or "").strip()
     if not full_name_val:
         raise HTTPException(status_code=422, detail="full_name or name is required")
@@ -562,6 +601,15 @@ def enroll(data: EnrollmentIn):
             ),
         )
         conn.commit()
+
+    # queue admin email after successful DB ops
+    background_tasks.add_task(
+        send_enroll_email,
+        full_name_val,
+        data.email or "",
+        data.phone or "",
+        data.notes or ""
+    )
 
     return {"ok": True, "message": "Enrollment confirmed. Seat deducted."}
 
