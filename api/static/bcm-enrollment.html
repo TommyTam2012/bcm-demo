@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BCM 入學報名表</title>
+  <style>
+    :root { --bg:#f7f9fc; --card:#ffffff; --ink:#0f172a; --muted:#64748b; --accent:#0d6efd; --ok:#16a34a; --bad:#dc2626; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "PingFang HK", "Noto Sans CJK HK", "Microsoft JhengHei", Arial, sans-serif; color:var(--ink); background:var(--bg); }
+    header { padding:24px 16px; text-align:center; }
+    h1 { margin:0 0 6px; font-size:28px; }
+    p.sub { margin:0; color:var(--muted); }
+    main { max-width:760px; margin:24px auto 64px; padding:0 16px; }
+    .card { background:var(--card); border-radius:16px; box-shadow:0 8px 24px rgba(15,23,42,.08); padding:20px; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .row .full { grid-column:1 / -1; }
+    label { display:block; font-weight:600; margin:10px 0 6px; }
+    input, select, textarea { width:100%; padding:12px 12px; border:1px solid #e5e7eb; border-radius:10px; font-size:16px; background:#fff; }
+    textarea { min-height:96px; resize:vertical; }
+    .small { font-size:12px; color:var(--muted); margin-top:4px; }
+    button[type="submit"] {
+      width:100%; padding:14px 16px; border:0; border-radius:12px; font-weight:800; font-size:18px;
+      background:var(--accent); color:#fff; cursor:pointer; box-shadow:0 10px 22px rgba(13,110,253,.35);
+    }
+    button[disabled]{ opacity:.6; cursor:not-allowed; }
+    .banner { margin-top:14px; padding:12px 14px; border-radius:10px; display:none; }
+    .banner.ok { display:block; background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; }
+    .banner.bad { display:block; background:#fef2f2; color:#7f1d1d; border:1px solid #fecaca; }
+    .muted { color:var(--muted); font-size:14px; }
+    .top-actions{ display:flex; justify-content:center; gap:12px; margin:0 auto 16px; flex-wrap:wrap; }
+    .ghost { background:#fff; border:1px solid #e5e7eb; color:var(--ink); }
+    .meta { margin:8px 0 0; font-size:13px; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BCM 入學報名表</h1>
+    <p class="sub">請選擇課程並填寫資料。名額有限，先到先得。</p>
+  </header>
+
+  <main>
+    <div class="top-actions">
+      <a class="ghost" href="/static/enroll.html" style="padding:10px 14px; border-radius:10px; text-decoration:none;">回到主報名頁</a>
+      <a class="ghost" href="/docs" style="padding:10px 14px; border-radius:10px; text-decoration:none;">Swagger 文件</a>
+    </div>
+
+    <form id="enroll-form" class="card" autocomplete="on">
+      <div class="row">
+        <div class="full">
+          <label for="course">選擇課程 <span class="muted">(以中文顯示)</span></label>
+          <select id="course" name="course_id" required>
+            <option value="" selected disabled>載入課程中…</option>
+          </select>
+          <div id="courseMeta" class="meta">—</div>
+        </div>
+
+        <div>
+          <label for="full_name">學生姓名</label>
+          <input id="full_name" name="full_name" type="text" placeholder="例如：陳大文" required />
+        </div>
+
+        <div>
+          <label for="phone">聯絡電話</label>
+          <input id="phone" name="phone" type="tel" placeholder="例如：9123 4567" />
+        </div>
+
+        <div>
+          <label for="email">電郵</label>
+          <input id="email" name="email" type="email" placeholder="you@example.com" />
+        </div>
+
+        <div>
+          <label for="timezone">時區</label>
+          <input id="timezone" name="timezone" type="text" placeholder="Asia/Hong_Kong" value="Asia/Hong_Kong" />
+        </div>
+
+        <div class="full">
+          <label for="notes">備註／想修讀的重點</label>
+          <textarea id="notes" name="notes" placeholder="可填：孩子程度、理想上課時段等…"></textarea>
+          <div class="small">提交後系統會自動電郵通知管理員（如已設定 SMTP）。</div>
+        </div>
+
+        <div class="full">
+          <button id="submitBtn" type="submit">提交報名</button>
+          <div id="msgOK" class="banner ok"></div>
+          <div id="msgBAD" class="banner bad"></div>
+        </div>
+      </div>
+    </form>
+
+    <p class="muted" style="margin-top:12px;">
+      小提示：如某課程顯示「(滿)」，代表已滿額，無法選擇；名額會在成功報名後自動扣減。
+    </p>
+  </main>
+
+  <script>
+    (function () {
+      const $course = document.getElementById('course');
+      const $courseMeta = document.getElementById('courseMeta');
+      const $form = document.getElementById('enroll-form');
+      const $ok = document.getElementById('msgOK');
+      const $bad = document.getElementById('msgBAD');
+      const $btn = document.getElementById('submitBtn');
+
+      // Utility: show messages
+      function showOK(text) {
+        $ok.textContent = text || '已成功提交，名額已扣減。';
+        $ok.style.display = 'block';
+        $bad.style.display = 'none';
+      }
+      function showBAD(text) {
+        $bad.textContent = text || '提交失敗，請稍後重試。';
+        $bad.style.display = 'block';
+        $ok.style.display = 'none';
+      }
+      function clearMsgs() {
+        $ok.style.display = 'none';
+        $bad.style.display = 'none';
+        $ok.textContent = '';
+        $bad.textContent = '';
+      }
+
+      // 1) Load course options
+      async function loadCourses() {
+        try {
+          const res = await fetch('/courses/options');
+          if (!res.ok) throw new Error('載入課程失敗');
+          const data = await res.json();
+          $course.innerHTML = '';
+          if (!Array.isArray(data) || data.length === 0) {
+            $course.innerHTML = '<option value="" disabled selected>目前沒有可選課程</option>';
+            $courseMeta.textContent = '—';
+            $btn.disabled = true;
+            return;
+          }
+          // Add placeholder
+          const ph = document.createElement('option');
+          ph.value = '';
+          ph.textContent = '請選擇課程…';
+          ph.disabled = true;
+          ph.selected = true;
+          $course.appendChild(ph);
+
+          // Render options (disable full)
+          data.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = String(c.id);
+            const seats = Number(c.seats || 0);
+            opt.textContent = seats > 0 ? `${c.name}（剩餘 ${seats}）` : `${c.name}（滿）`;
+            if (seats <= 0) opt.disabled = true;
+            $course.appendChild(opt);
+          });
+
+          $btn.disabled = false;
+        } catch (err) {
+          console.error(err);
+          $course.innerHTML = '<option value="" disabled selected>載入課程失敗</option>';
+          $courseMeta.textContent = '—';
+          $btn.disabled = true;
+        }
+      }
+
+      // 2) Show simple meta under the select
+      $course.addEventListener('change', () => {
+        const opt = $course.selectedOptions[0];
+        if (!opt || !opt.value) { $courseMeta.textContent = '—'; return; }
+        $courseMeta.textContent = `已選：${opt.textContent}`;
+      });
+
+      // 3) Submit handler → POST /enroll
+      $form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearMsgs();
+
+        const course_id = $course.value ? Number($course.value) : null;
+        const full_name = document.getElementById('full_name').value.trim();
+        const phone = document.getElementById('phone').value.trim();
+        const email = document.getElementById('email').value.trim();
+        const timezone = document.getElementById('timezone').value.trim();
+        const notes = document.getElementById('notes').value.trim();
+
+        if (!course_id) { showBAD('請先選擇課程。'); return; }
+        if (!full_name) { showBAD('請輸入學生姓名。'); return; }
+
+        $btn.disabled = true; $btn.textContent = '提交中…';
+
+        try {
+          const res = await fetch('/enroll', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              course_id,
+              full_name,
+              phone,
+              email,
+              timezone,
+              notes,
+              source: 'web'
+            })
+          });
+          const data = await res.json();
+
+          if (!res.ok) {
+            const msg = (data && (data.detail || data.message)) || '提交失敗';
+            showBAD(msg);
+          } else if (data && data.ok) {
+            showOK('報名成功！系統已扣減名額。');
+            // refresh options so seats update
+            await loadCourses();
+            // keep selection UI updated (will reset to placeholder)
+            $form.reset();
+            $courseMeta.textContent = '—';
+          } else {
+            const msg = (data && data.message) || '未能完成報名（可能已滿額）。';
+            showBAD(msg);
+            // refresh options (seat may hit 0)
+            await loadCourses();
+          }
+        } catch (err) {
+          console.error(err);
+          showBAD('系統繁忙，請稍後再試。');
+        } finally {
+          $btn.disabled = false; $btn.textContent = '提交報名';
+        }
+      });
+
+      // Kick off
+      loadCourses();
+    })();
+  </script>
+</body>
+</html>
