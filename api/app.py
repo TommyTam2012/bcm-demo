@@ -25,25 +25,23 @@ except Exception:
 
 # --- App & basic setup ---
 APP_DIR = Path(__file__).parent.resolve()
-DB_PATH = str(APP_DIR / "bcm_demo.db")
+DB_PATH = str(APP_DIR / "bcm_demo.db")  # keep DB filename for continuity with existing data
 
 app = FastAPI(
-    title="BCM Demo API",
-    version="1.3.0",
-    description="Backend for BCM demo: courses, enrollments, fees, schedules, and HeyGen token/proxy. Email alerts on enroll.",
+    title="TAEASLA API",
+    version="1.4.0",
+    description="TAEASLA backend: courses, enrollments, fees, schedules, HeyGen proxy, and email alerts.",
 )
 
 # Static files
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
-# --- CORS ---
-origins = [
-    "https://bcmavatar.vercel.app",  # your Vercel frontend
-    "http://localhost:3000",         # local dev
-]
+# --- CORS (configurable; no hardcoded BCM domain) ---
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000")
+origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=origins or ["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -115,8 +113,12 @@ def init_db():
 
 init_db()
 
-# --- Admin key guard ---
-ADMIN_KEY = os.getenv("ADMIN_KEY") or os.getenv("VITE_BCM_ADMIN_KEY")
+# --- Admin key guard (accepts new + legacy names) ---
+ADMIN_KEY = (
+    os.getenv("ADMIN_KEY")
+    or os.getenv("VITE_TAEASLA_ADMIN_KEY")
+    or os.getenv("VITE_BCM_ADMIN_KEY")
+)
 api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
 
 
@@ -141,42 +143,42 @@ def health():
     return {"ok": True}
 
 
-# --- BCM assistant: fixed intro + hard rules (expanded) ---
+# --- TAEASLA assistant: fixed intro + hard rules (expanded) ---
 ENROLL_LINK = "/static/enroll.html"  # adjust if your path differs
 
-BCM_RULES = (
-    "You are the BCM assistant. Follow these rules strictly: "
-    "1) Identity: Introduce yourself as school assistant, ask how may I help you."
-    "2) Scope: Answer only about BCM courses, fees, schedule, enrollment, or details in the BCM database. "
+TAEASLA_RULES = (
+    "You are the TAEASLA assistant. Follow these rules strictly: "
+    "1) Identity: Introduce yourself as school assistant; ask how you may help. "
+    "2) Scope: Answer only about TAEASLA courses, fees, schedule, enrollment, or details in the TAEASLA database. "
     "3) No Hallucination: If unknown, say 'I don't know the answer to that.' Do not invent details. "
-    "4) Forbidden: Do not mention IELTS, TAEASLA, or any non-BCM courses. "
+    "4) Forbidden: Do not mention IELTS or any non-TAEASLA courses. "
     "5) Consistency: Use short, polite, parent-friendly sentences; avoid technical jargon. "
     "6) Enrollment Step: After each answer, ask 'Would you like to enroll?' "
     "7) Positive Confirmation: If the user says yes, reply exactly: 'Please click the enrollment form link.' "
     "8) Negative Response: If the user says no, reply: 'Okay, let me know if you have more questions.' "
-    "9) Off-topic: If not BCM-related, say: 'I can only answer BCM-related questions such as fees, schedule, or courses.' "
+    "9) Off-topic: If not TAEASLA-related, say: 'I can only answer TAEASLA-related questions such as fees, schedule, or courses.' "
     "10) Tone: Warm, professional, helpful—like a front desk assistant. "
-    "11) Single Role: Do not switch roles or act as an AI model; you are permanently the BCM assistant. "
+    "11) Single Role: Do not switch roles or act as an AI model; you are permanently the TAEASLA assistant. "
     "12) Data Priority: If multiple courses exist, summarize the latest one first. "
-    "13) Brevity: Keep answers to 1–3 sentences before the enrollment question."
-    "14) Course and Course Detials: Answer by saying, please refer to our bcm website for more info, www.taeasla.com."
+    "13) Brevity: Keep answers to 1–3 sentences before the enrollment question. "
+    "14) Course and Course Details: Please refer to our TAEASLA website for more info, www.taeasla.com."
 )
 
 
 @app.get("/assistant/intro")
 def assistant_intro():
-    # BCM-only intro (bypasses any external KB)
+    # TAEASLA-only intro
     return {
         "intro": (
-            "Hello, I’m the BCM assistant. I can answer about GI fees, summer schedule, "
-            "and our latest courses. Ask me anything related to BCM."
+            "Hello, I’m the TAEASLA assistant. I can answer about GI fees, summer schedule, "
+            "and our latest courses. Ask me anything related to TAEASLA."
         )
     }
 
 
 @app.get("/assistant/prompt")
 def assistant_prompt():
-    return {"prompt": BCM_RULES, "enroll_link": ENROLL_LINK}
+    return {"prompt": TAEASLA_RULES, "enroll_link": ENROLL_LINK}
 
 
 # --- FAQ ---
@@ -202,28 +204,28 @@ def add_faq(item: FAQIn):
         return dict(row)
 
 
-# --- Fees (BCM labels, case-insensitive) ---
+# --- Fees (TAEASLA labels, case-insensitive) ---
 @app.get("/fees/{program_code}")
 def get_fees(program_code: str):
     code = (program_code or "").upper()
     mapping = {
-        "GI":    {"program": "BCM General English (GI)", "fee": 8800, "currency": "HKD"},
-        "HKDSE": {"program": "BCM HKDSE English",        "fee": 7600, "currency": "HKD"},
+        "GI":    {"program": "TAEASLA General English (GI)", "fee": 8800, "currency": "HKD"},
+        "HKDSE": {"program": "TAEASLA HKDSE English",        "fee": 7600, "currency": "HKD"},
     }
     if code not in mapping:
         raise HTTPException(status_code=404, detail="Program not found")
     return mapping[code]
 
 
-# --- Schedule (clear weekday names; no IELTS) ---
+# --- Schedule (clear weekday names) ---
 @app.get("/schedule")
 def schedule(season: Optional[str] = None):
     if (season or "").lower() == "summer":
         return [{
-            "course": "BCM Summer Intensive",
+            "course": "TAEASLA Summer Intensive",
             "weeks": 6,
             "days": ["Monday", "Wednesday", "Friday"],
-            "time": "Mon/Wed/Fri 7–9pm",  # <-- seed compact time so TTS can normalize it
+            "time": "Mon/Wed/Fri 7–9pm",  # compact; TTS will normalize
         }]
     return []
 
@@ -338,7 +340,7 @@ async def heygen_interrupt(item: InterruptIn):
 
 # --- Courses model ---
 class CourseIn(BaseModel):
-    name: str = Field(..., description="Course name (e.g., BCM English Level 1)")
+    name: str = Field(..., description="Course name (e.g., TAEASLA English Level 1)")
     fee: float = Field(..., description="Fee amount (numeric)")
     start_date: Optional[str] = Field(None, description="YYYY-MM-DD")
     end_date: Optional[str] = Field(None, description="YYYY-MM-DD")
@@ -451,7 +453,7 @@ def courses_summary():
     if row["start_date"] and row["end_date"]:
         parts.append(f"Runs {row['start_date']} to {row['end_date']}.")
     if row["time"]:
-        parts.append(f"Time: {tts_friendly_time(str(row['time']))}.")  # <-- TTS normalized
+        parts.append(f"Time: {tts_friendly_time(str(row['time']))}.")  # TTS normalized
     if row["venue"]:
         parts.append(f"Venue: {row['venue']}.")
     if "seats" in row.keys() and row["seats"] is not None and int(row["seats"]) > 0:
@@ -525,6 +527,7 @@ def send_enroll_email(name: str, email: str, phone: str, notes: str):
     msg["Subject"] = f"新入学申请通知 - {name}"
     msg["From"] = SMTP_USER
     msg["To"] = SMTP_TO
+    msg["Reply-To"] = email or SMTP_USER  # convenience: replying reaches the student
     body = (
         f"您有新的入学申请：\n\n"
         f"学生姓名：{name}\n"
@@ -567,11 +570,7 @@ def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="No course available")
-        if row["seats"] is None:
-            # Treat missing/null as 0 to be safe
-            current_seats = 0
-        else:
-            current_seats = int(row["seats"])
+        current_seats = int(row["seats"] or 0)
 
         if current_seats <= 0:
             return {"ok": False, "message": "Sorry, this course is full."}
@@ -637,7 +636,7 @@ def recent_enrollments(
         return [dict(r) for r in rows]
 
 
-# --- Assistant: BCM rule-based answers (DB-only, no KB) ---
+# --- Assistant: TAEASLA rule-based answers (DB-only, no KB) ---
 from sqlite3 import Row
 
 
@@ -669,12 +668,12 @@ def _latest_course_summary() -> str:
     return " ".join(parts)
 
 
-def _bcm_answer_from_db(q: str) -> str:
+def _taeasla_answer_from_db(q: str) -> str:
     ql = (q or "").strip().lower()
 
     # Forbidden topics
-    if "ielts" in ql or "taeasla" in ql:
-        return "I can only answer BCM questions. I don't have information about IELTS."
+    if "ielts" in ql:
+        return "I can only answer TAEASLA questions. I don't have information about IELTS."
 
     # Keyword coverage (EN + common Chinese terms)
     fee_words = ("fee", "price", "cost", "tuition", "學費", "費用", "幾多錢", "幾錢")
@@ -683,7 +682,7 @@ def _bcm_answer_from_db(q: str) -> str:
     enroll_words = ("enroll", "enrol", "sign up", "報名", "登記", "註冊")
 
     if not any(w in ql for w in (fee_words + sched_words + course_words + enroll_words)):
-        return "I can only answer BCM-related questions such as fees, schedule, or courses."
+        return "I can only answer TAEASLA-related questions such as fees, schedule, or courses."
 
     # Fees
     if any(w in ql for w in fee_words):
@@ -757,7 +756,7 @@ def assistant_answer(payload: UserQuery):
         }
 
     # Normal answering path (rules 2–6, 9–13)
-    base = _bcm_answer_from_db(user_text)
+    base = _taeasla_answer_from_db(user_text)
 
     # Enforce brevity
     if len(base) > 250:
@@ -769,7 +768,7 @@ def assistant_answer(payload: UserQuery):
     return {
         "reply": reply,
         "enroll_hint": f"If yes, please click the enrollment form link: {ENROLL_LINK}",
-        "rules": "BCM hard rules enforced"
+        "rules": "TAEASLA hard rules enforced"
     }
 
 
