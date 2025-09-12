@@ -16,6 +16,7 @@ import json
 import re  # <-- TTS normalization uses regex
 import ssl, smtplib
 from email.message import EmailMessage
+from sqlite3 import Row
 
 # Optional OpenAI import (safe if package not installed)
 try:
@@ -29,7 +30,7 @@ DB_PATH = str(APP_DIR / "bcm_demo.db")  # keep DB filename for continuity with e
 
 app = FastAPI(
     title="TAEASLA API",
-    version="1.5.0",
+    version="1.5.1",
     description="TAEASLA backend: courses, enrollments, fees, schedules, HeyGen proxy, and email alerts.",
 )
 
@@ -333,8 +334,10 @@ async def heygen_interrupt(item: InterruptIn):
 
 
 # =========================================================
+# ================== COURSES & ENROLLMENT =================
+# =========================================================
 
-# --- Courses model ---
+# --- Input model for manual course add (admin) ---
 class CourseIn(BaseModel):
     name: str = Field(..., description="Course name (displayed in Chinese for BCM drop-down)")
     fee: float = Field(..., description="Fee amount (numeric)")
@@ -383,7 +386,8 @@ def tts_friendly_time(s: str) -> str:
     return t
 
 
-# --- Courses CRUD ---
+# -------------------- ADMIN: add/list/delete/export --------------------
+
 @app.post("/admin/courses", dependencies=[Security(require_admin)], tags=["admin"])
 def admin_add_course(course: CourseIn):
     return add_course(course)
@@ -423,7 +427,63 @@ def list_courses() -> List[Dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
-# --- Helper: Course summary (place ABOVE /courses/{course_id}) ---
+# -------------------- IMPORTANT: static endpoints BEFORE /courses/{id} -----
+
+# Chinese labels (Traditional) for UI drop-down
+# (Fees set to 0.0 as placeholders; adjust later in Swagger or DB)
+BCM_SEED = [
+    ("自然拼讀", 0.0, 30),              # Phonics
+    ("拼寫", 0.0, 30),                  # Spelling
+    ("文法", 0.0, 30),                  # Grammar
+    ("青少年雅思", 0.0, 25),            # Junior IELTS
+    ("呈分試", 0.0, 40),                # Primary/Junior assessment
+    ("香港 Band 1 入學考試", 0.0, 40),   # Band1 Entrance Exam
+    ("香港中學文憑試", 0.0, 35),          # HKDSE
+    ("雅思", 0.0, 35),                  # IELTS
+    ("托福", 0.0, 35),                  # TOEFL
+]
+
+class SeedResult(BaseModel):
+    seeded: int
+    reset: bool
+
+
+@app.post("/courses/seed", response_model=SeedResult, dependencies=[Security(require_admin)], tags=["courses"])
+def seed_courses(reset: bool = Query(True, description="If true, clears and reseeds")):
+    """
+    Seed the course catalog in Chinese for BCM drop-down.
+    You can re-run from Swagger. If reset=True, clears the table first.
+    """
+    with get_db() as conn:
+        if reset:
+            conn.execute("DELETE FROM courses")
+        count = 0
+        for (name_zh, fee, seats) in BCM_SEED:
+            conn.execute(
+                """
+                INSERT INTO courses (name, fee, start_date, end_date, time, venue, seats)
+                VALUES (?, ?, NULL, NULL, NULL, NULL, ?)
+                """,
+                (name_zh, float(fee), int(seats)),
+            )
+            count += 1
+        conn.commit()
+    return SeedResult(seeded=count, reset=bool(reset))
+
+
+@app.get("/courses/options", tags=["courses"])
+def course_options() -> List[Dict[str, Any]]:
+    """
+    Minimal payload for front-end drop-down:
+    [{ id, name, seats }]
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, name, seats FROM courses ORDER BY id ASC"
+        ).fetchall()
+        return [{"id": r["id"], "name": r["name"], "seats": int(r["seats"] or 0)} for r in rows]
+
+
 @app.get("/courses/summary")
 def courses_summary():
     with get_db() as conn:
@@ -448,6 +508,8 @@ def courses_summary():
         parts.append(f"Seats left: {int(row['seats'])}.")
     return {"summary": " ".join(parts)}
 
+
+# -------------------- THEN the dynamic route --------------------
 
 @app.get("/courses/{course_id}")
 def get_course(course_id: int) -> Dict[str, Any]:
@@ -639,8 +701,6 @@ def recent_enrollments(
 
 
 # --- Assistant: TAEASLA rule-based answers (DB-only, no KB) ---
-from sqlite3 import Row
-
 
 class UserQuery(BaseModel):
     text: str
@@ -782,62 +842,3 @@ def stream():
         time.sleep(0.5)
         yield b"data: world\n\n"
     return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-# =========================================================
-# ====== BCM DROP-DOWN SEED + OPTIONS ENDPOINTS ===========
-# =========================================================
-
-# Chinese labels (Traditional) for UI drop-down
-# (Fees set to 0.0 as placeholders; adjust later in Swagger or DB)
-BCM_SEED = [
-    ("自然拼讀", 0.0, 30),          # Phonics
-    ("拼寫", 0.0, 30),              # Spelling
-    ("文法", 0.0, 30),              # Grammar
-    ("青少年雅思", 0.0, 25),        # Junior IELTS
-    ("呈分試", 0.0, 40),            # HK primary/secondary assessment
-    ("香港 Band 1 入學考試", 0.0, 40), # Band1 Entrance Exam
-    ("香港中學文憑試", 0.0, 35),      # HKDSE
-    ("雅思", 0.0, 35),              # IELTS
-    ("托福", 0.0, 35),              # TOEFL
-]
-
-class SeedResult(BaseModel):
-    seeded: int
-    reset: bool
-
-
-@app.post("/courses/seed", response_model=SeedResult, dependencies=[Security(require_admin)], tags=["courses"])
-def seed_courses(reset: bool = Query(True, description="If true, clears and reseeds")):
-    """
-    Seed the course catalog in Chinese for BCM drop-down.
-    You can re-run from Swagger. If reset=True, clears the table first.
-    """
-    with get_db() as conn:
-        if reset:
-            conn.execute("DELETE FROM courses")
-        count = 0
-        for (name_zh, fee, seats) in BCM_SEED:
-            conn.execute(
-                """
-                INSERT INTO courses (name, fee, start_date, end_date, time, venue, seats)
-                VALUES (?, ?, NULL, NULL, NULL, NULL, ?)
-                """,
-                (name_zh, float(fee), int(seats)),
-            )
-            count += 1
-        conn.commit()
-    return SeedResult(seeded=count, reset=bool(reset))
-
-
-@app.get("/courses/options", tags=["courses"])
-def course_options() -> List[Dict[str, Any]]:
-    """
-    Minimal payload for front-end drop-down:
-    [{ id, name, seats }]
-    """
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, name, seats FROM courses ORDER BY id ASC"
-        ).fetchall()
-        return [{"id": r["id"], "name": r["name"], "seats": int(r["seats"] or 0)} for r in rows]
