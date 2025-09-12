@@ -103,7 +103,6 @@
       const $bad = document.getElementById('msgBAD');
       const $btn = document.getElementById('submitBtn');
 
-      // Utility: show messages
       function showOK(text) {
         $ok.textContent = text || '已成功提交，名額已扣減。';
         $ok.style.display = 'block';
@@ -134,7 +133,6 @@
             $btn.disabled = true;
             return;
           }
-          // Add placeholder
           const ph = document.createElement('option');
           ph.value = '';
           ph.textContent = '請選擇課程…';
@@ -142,7 +140,6 @@
           ph.selected = true;
           $course.appendChild(ph);
 
-          // Render options (disable full)
           data.forEach(c => {
             const opt = document.createElement('option');
             opt.value = String(c.id);
@@ -161,14 +158,13 @@
         }
       }
 
-      // 2) Show simple meta under the select
+      // 2) Update meta on change
       $course.addEventListener('change', () => {
         const opt = $course.selectedOptions[0];
-        if (!opt || !opt.value) { $courseMeta.textContent = '—'; return; }
-        $courseMeta.textContent = `已選：${opt.textContent}`;
+        $courseMeta.textContent = opt && opt.value ? `已選：${opt.textContent}` : '—';
       });
 
-      // 3) Submit handler → POST /enroll
+      // 3) Submit → POST /enroll
       $form.addEventListener('submit', async (e) => {
         e.preventDefault();
         clearMsgs();
@@ -206,15 +202,12 @@
             showBAD(msg);
           } else if (data && data.ok) {
             showOK('報名成功！系統已扣減名額。');
-            // refresh options so seats update
-            await loadCourses();
-            // keep selection UI updated (will reset to placeholder)
+            await loadCourses();   // refresh seats
             $form.reset();
             $courseMeta.textContent = '—';
           } else {
             const msg = (data && data.message) || '未能完成報名（可能已滿額）。';
             showBAD(msg);
-            // refresh options (seat may hit 0)
             await loadCourses();
           }
         } catch (err) {
@@ -225,7 +218,6 @@
         }
       });
 
-      // Kick off
       loadCourses();
     })();
   </script>
