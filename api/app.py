@@ -1,3 +1,5 @@
+# app.py  — TAEASLA API (persisted DB + startup seed + HEAD-friendly health)
+
 from fastapi import FastAPI, HTTPException, Query, Security, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +19,7 @@ import re  # <-- TTS normalization uses regex
 import ssl, smtplib
 from email.message import EmailMessage
 from sqlite3 import Row
+import shutil  # <-- for DB migration copy
 
 # Optional OpenAI import (safe if package not installed)
 try:
@@ -26,11 +29,25 @@ except Exception:
 
 # --- App & basic setup ---
 APP_DIR = Path(__file__).parent.resolve()
-DB_PATH = str(APP_DIR / "bcm_demo.db")  # keep DB filename for continuity with existing data
+
+# Prefer persistent disk at /data; else keep local file.
+# If we detect an older DB in app dir and none in /data, migrate it once.
+DATA_DIR = Path("/data")
+LEGACY_DB = APP_DIR / "bcm_demo.db"
+PERSIST_DB = DATA_DIR / "bcm_demo.db"
+if DATA_DIR.is_dir():
+    if LEGACY_DB.exists() and not PERSIST_DB.exists():
+        try:
+            PERSIST_DB.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(LEGACY_DB), str(PERSIST_DB))
+        except Exception:
+            # If copy fails, we'll still fall back gracefully below
+            pass
+DB_PATH = str(PERSIST_DB if PERSIST_DB.exists() or DATA_DIR.is_dir() else LEGACY_DB)
 
 app = FastAPI(
     title="TAEASLA API",
-    version="1.5.1",
+    version="1.6.0",
     description="TAEASLA backend: courses, enrollments, fees, schedules, HeyGen proxy, and email alerts.",
 )
 
@@ -54,14 +71,12 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     try:
         cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any((c[1] == column) for c in cols)
     except Exception:
         return False
-
 
 def init_db():
     with get_db() as conn:
@@ -108,8 +123,33 @@ def init_db():
         )
         conn.commit()
 
+# ---------- Chinese seed set (for startup and manual /courses/seed) ----------
+BCM_SEED = [
+    ("自然拼讀", 0.0, 30),              # Phonics
+    ("拼寫", 0.0, 30),                  # Spelling
+    ("文法", 0.0, 30),                  # Grammar
+    ("青少年雅思", 0.0, 25),            # Junior IELTS
+    ("呈分試", 0.0, 40),                # Primary/Junior assessment
+    ("香港 Band 1 入學考試", 0.0, 40),   # Band1 Entrance Exam
+    ("香港中學文憑試", 0.0, 35),          # HKDSE
+    ("雅思", 0.0, 35),                  # IELTS
+    ("托福", 0.0, 35),                  # TOEFL
+]
 
-init_db()
+def seed_if_empty():
+    """Idempotent: only seeds when courses table is empty."""
+    with get_db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM courses").fetchone()
+        if row and int(row["c"] or 0) == 0:
+            for (name_zh, fee, seats) in BCM_SEED:
+                conn.execute(
+                    """
+                    INSERT INTO courses (name, fee, start_date, end_date, time, venue, seats)
+                    VALUES (?, ?, NULL, NULL, NULL, NULL, ?)
+                    """,
+                    (name_zh, float(fee), int(seats)),
+                )
+            conn.commit()
 
 # --- Admin key guard (accepts new + legacy names) ---
 ADMIN_KEY = (
@@ -118,7 +158,6 @@ ADMIN_KEY = (
     or os.getenv("VITE_BCM_ADMIN_KEY")
 )
 api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
-
 
 def require_admin(x_admin_key: str = Security(api_key_header)):
     if not ADMIN_KEY:
@@ -129,17 +168,26 @@ def require_admin(x_admin_key: str = Security(api_key_header)):
         raise HTTPException(status_code=403, detail="Forbidden (bad X-Admin-Key)")
     return True
 
+# ---------- Startup: ensure schema + auto-seed ----------
+@app.on_event("startup")
+def _startup():
+    init_db()
+    seed_if_empty()
 
 # --- Basic routes ---
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/enroll.html")
 
-
-@app.get("/health")
-def health():
+# --- Health: accept GET / HEAD / OPTIONS (fix 405 monitors) ---
+@app.api_route("/health", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
+@app.api_route("/health/", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
+def health(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers={"Allow": "GET, HEAD, OPTIONS"})
     return {"ok": True}
-
 
 # --- TAEASLA assistant: fixed intro + hard rules (expanded) ---
 ENROLL_LINK = "/static/enroll.html"  # adjust if your path differs
@@ -162,7 +210,6 @@ TAEASLA_RULES = (
     "14) Course and Course Details: Please refer to our TAEASLA website for more info, www.taeasla.com."
 )
 
-
 @app.get("/assistant/intro")
 def assistant_intro():
     return {
@@ -172,11 +219,9 @@ def assistant_intro():
         )
     }
 
-
 @app.get("/assistant/prompt")
 def assistant_prompt():
     return {"prompt": TAEASLA_RULES, "enroll_link": ENROLL_LINK}
-
 
 # --- FAQ ---
 @app.get("/faq")
@@ -185,11 +230,9 @@ def get_faq() -> List[Dict[str, Any]]:
         rows = conn.execute("SELECT id, q, a FROM faq ORDER BY id ASC").fetchall()
         return [dict(r) for r in rows]
 
-
 class FAQIn(BaseModel):
     q: str
     a: str
-
 
 @app.post("/faq", dependencies=[Security(require_admin)], tags=["admin"])
 def add_faq(item: FAQIn):
@@ -199,7 +242,6 @@ def add_faq(item: FAQIn):
         fid = cur.lastrowid
         row = conn.execute("SELECT id, q, a FROM faq WHERE id = ?", (fid,)).fetchone()
         return dict(row)
-
 
 # --- Fees (TAEASLA labels, case-insensitive) ---
 @app.get("/fees/{program_code}")
@@ -213,7 +255,6 @@ def get_fees(program_code: str):
         raise HTTPException(status_code=404, detail="Program not found")
     return mapping[code]
 
-
 # --- Schedule (clear weekday names) ---
 @app.get("/schedule")
 def schedule(season: Optional[str] = None):
@@ -226,20 +267,16 @@ def schedule(season: Optional[str] = None):
         }]
     return []
 
-
 # --- Admin check ---
 @app.get("/admin/check", dependencies=[Security(require_admin)], tags=["admin"])
 def admin_check():
     return {"ok": True, "message": "Admin access confirmed."}
 
-
 # =========================================================
 # === HeyGen CONFIG + TOKEN + PROXY + INTERRUPT ==========
 # =========================================================
-
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY") or os.getenv("ADMIN_KEY")
 HEYGEN_BASE = "https://api.heygen.com/v1"
-
 
 @app.post("/heygen/token")
 async def heygen_token():
@@ -273,7 +310,6 @@ async def heygen_token():
 
     return data
 
-
 @app.api_route("/heygen/proxy/{subpath:path}", methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"], tags=["public"])
 async def heygen_proxy(subpath: str, request: Request):
     if not HEYGEN_API_KEY:
@@ -300,11 +336,8 @@ async def heygen_proxy(subpath: str, request: Request):
     return Response(content=r.content, status_code=r.status_code,
                     media_type=r.headers.get("content-type", "application/json"))
 
-
-# --- HeyGen: Interrupt convenience endpoint ---
 class InterruptIn(BaseModel):
     session_id: str
-
 
 @app.post("/heygen/interrupt")
 async def heygen_interrupt(item: InterruptIn):
@@ -332,12 +365,9 @@ async def heygen_interrupt(item: InterruptIn):
 
     return {"ok": True, "data": data}
 
-
 # =========================================================
 # ================== COURSES & ENROLLMENT =================
 # =========================================================
-
-# --- Input model for manual course add (admin) ---
 class CourseIn(BaseModel):
     name: str = Field(..., description="Course name (displayed in Chinese for BCM drop-down)")
     fee: float = Field(..., description="Fee amount (numeric)")
@@ -346,7 +376,6 @@ class CourseIn(BaseModel):
     time: Optional[str] = Field(None, description="e.g., Mon/Wed/Fri 7–9pm")
     venue: Optional[str] = Field(None, description="Room / Center")
     seats: Optional[int] = Field(0, ge=0, description="Seats remaining (defaults to 0)")
-
 
 # --- TTS helper: normalize compact time strings for clear speech ---
 def tts_friendly_time(s: str) -> str:
@@ -385,13 +414,10 @@ def tts_friendly_time(s: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-
 # -------------------- ADMIN: add/list/delete/export --------------------
-
 @app.post("/admin/courses", dependencies=[Security(require_admin)], tags=["admin"])
 def admin_add_course(course: CourseIn):
     return add_course(course)
-
 
 @app.post("/courses", dependencies=[Security(require_admin)], tags=["courses"])
 def add_course(course: CourseIn):
@@ -414,7 +440,6 @@ def add_course(course: CourseIn):
         conn.commit()
         return dict(row)
 
-
 @app.get("/courses")
 def list_courses() -> List[Dict[str, Any]]:
     with get_db() as conn:
@@ -426,27 +451,9 @@ def list_courses() -> List[Dict[str, Any]]:
         ).fetchall()
         return [dict(r) for r in rows]
 
-
-# -------------------- IMPORTANT: static endpoints BEFORE /courses/{id} -----
-
-# Chinese labels (Traditional) for UI drop-down
-# (Fees set to 0.0 as placeholders; adjust later in Swagger or DB)
-BCM_SEED = [
-    ("自然拼讀", 0.0, 30),              # Phonics
-    ("拼寫", 0.0, 30),                  # Spelling
-    ("文法", 0.0, 30),                  # Grammar
-    ("青少年雅思", 0.0, 25),            # Junior IELTS
-    ("呈分試", 0.0, 40),                # Primary/Junior assessment
-    ("香港 Band 1 入學考試", 0.0, 40),   # Band1 Entrance Exam
-    ("香港中學文憑試", 0.0, 35),          # HKDSE
-    ("雅思", 0.0, 35),                  # IELTS
-    ("托福", 0.0, 35),                  # TOEFL
-]
-
 class SeedResult(BaseModel):
     seeded: int
     reset: bool
-
 
 @app.post("/courses/seed", response_model=SeedResult, dependencies=[Security(require_admin)], tags=["courses"])
 def seed_courses(reset: bool = Query(True, description="If true, clears and reseeds")):
@@ -470,7 +477,6 @@ def seed_courses(reset: bool = Query(True, description="If true, clears and rese
         conn.commit()
     return SeedResult(seeded=count, reset=bool(reset))
 
-
 @app.get("/courses/options", tags=["courses"])
 def course_options() -> List[Dict[str, Any]]:
     """
@@ -482,7 +488,6 @@ def course_options() -> List[Dict[str, Any]]:
             "SELECT id, name, seats FROM courses ORDER BY id ASC"
         ).fetchall()
         return [{"id": r["id"], "name": r["name"], "seats": int(r["seats"] or 0)} for r in rows]
-
 
 @app.get("/courses/summary")
 def courses_summary():
@@ -508,9 +513,6 @@ def courses_summary():
         parts.append(f"Seats left: {int(row['seats'])}.")
     return {"summary": " ".join(parts)}
 
-
-# -------------------- THEN the dynamic route --------------------
-
 @app.get("/courses/{course_id}")
 def get_course(course_id: int) -> Dict[str, Any]:
     with get_db() as conn:
@@ -525,7 +527,6 @@ def get_course(course_id: int) -> Dict[str, Any]:
             raise HTTPException(status_code=404, detail="Course not found")
         return dict(row)
 
-
 @app.delete("/courses/{course_id}", dependencies=[Security(require_admin)], tags=["admin"])
 def delete_course(course_id: int):
     with get_db() as conn:
@@ -535,8 +536,6 @@ def delete_course(course_id: int):
             raise HTTPException(status_code=404, detail="Course not found")
         return {"ok": True, "deleted": course_id}
 
-
-# --- CSV export for courses ---
 @app.get("/courses/export.csv")
 def export_courses_csv():
     with get_db() as conn:
@@ -554,7 +553,6 @@ def export_courses_csv():
             r["id"], r["name"], r["fee"], r["start_date"], r["end_date"], r["time"], r["venue"], r.get("seats", 0),
         ])
     return Response(content=output.getvalue(), media_type="text/csv")
-
 
 # =========================
 # Email Notification Config
@@ -593,7 +591,6 @@ def send_enroll_email(name: str, email: str, phone: str, notes: str):
         server.login(SMTP_USER, SMTP_PASS)
         server.send_message(msg)
 
-
 # --- Enrollment ---
 class EnrollmentIn(BaseModel):
     full_name: Optional[str] = None
@@ -606,7 +603,6 @@ class EnrollmentIn(BaseModel):
     notes: Optional[str] = None
     source: Optional[str] = Field(default="web", description="Where this came from (web/journal/etc)")
     course_id: Optional[int] = Field(None, description="Selected course ID from drop-down")
-
 
 @app.post("/enroll", tags=["enroll"])
 def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
@@ -676,7 +672,6 @@ def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
 
     return {"ok": True, "message": "Enrollment confirmed. Seat deducted.", "course_id": int(row["id"])}
 
-
 @app.get("/enrollments/recent", dependencies=[Security(require_admin)], tags=["admin"])
 def recent_enrollments(
     limit: int = Query(10, ge=1, le=100),
@@ -699,12 +694,9 @@ def recent_enrollments(
         rows = conn.execute(sql, tuple(params)).fetchall()
         return [dict(r) for r in rows]
 
-
 # --- Assistant: TAEASLA rule-based answers (DB-only, no KB) ---
-
 class UserQuery(BaseModel):
     text: str
-
 
 def _latest_course_summary() -> str:
     with get_db() as conn:
@@ -728,7 +720,6 @@ def _latest_course_summary() -> str:
     if "seats" in row.keys() and row["seats"] is not None and int(row["seats"]) > 0:
         parts.append(f"Seats left: {int(row['seats'])}.")
     return " ".join(parts)
-
 
 def _taeasla_answer_from_db(q: str) -> str:
     ql = (q or "").strip().lower()
@@ -789,18 +780,15 @@ def _taeasla_answer_from_db(q: str) -> str:
     # Fallback
     return "I don't know the answer to that."
 
-
 def _is_yes(q: str) -> bool:
     ql = (q or "").strip().lower()
     yes_words = {"yes","yeah","yep","ok","okay","sure","please","好的","要","係","係呀","好","是","行","可以"}
     return any(w == ql or w in ql for w in yes_words)
 
-
 def _is_no(q: str) -> bool:
     ql = (q or "").strip().lower()
     no_words = {"no","nope","nah","not now","不用","唔要","唔使","不要","否","先唔好"}
     return any(w == ql or w in ql for w in no_words)
-
 
 @app.post("/assistant/answer")
 def assistant_answer(payload: UserQuery):
@@ -833,7 +821,6 @@ def assistant_answer(payload: UserQuery):
         "rules": "TAEASLA hard rules enforced"
     }
 
-
 # --- Simple SSE/streaming example (placeholder) ---
 @app.get("/stream")
 def stream():
@@ -842,3 +829,8 @@ def stream():
         time.sleep(0.5)
         yield b"data: world\n\n"
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+# For local dev
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
