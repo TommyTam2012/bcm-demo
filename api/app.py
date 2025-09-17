@@ -47,7 +47,7 @@ DB_PATH = str(PERSIST_DB if PERSIST_DB.exists() or DATA_DIR.is_dir() else LEGACY
 
 app = FastAPI(
     title="TAEASLA API",
-    version="1.6.0",
+    version="1.7.0",
     description="TAEASLA backend: courses, enrollments, fees, schedules, HeyGen proxy, and email alerts.",
 )
 
@@ -273,42 +273,93 @@ def admin_check():
     return {"ok": True, "message": "Admin access confirmed."}
 
 # =========================================================
-# === HeyGen CONFIG + TOKEN + PROXY + INTERRUPT ==========
+# === HeyGen CONFIG + TOKEN/START + SAY + PROXY + STOP ====
 # =========================================================
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY") or os.getenv("ADMIN_KEY")
 HEYGEN_BASE = "https://api.heygen.com/v1"
 
+def _ok_json_or_raise(r: httpx.Response):
+    if r.status_code == 200:
+        try:
+            return r.json()
+        except Exception:
+            raise HTTPException(502, f"Non-JSON body from HeyGen: {r.text[:500]}")
+    raise HTTPException(r.status_code, r.text)
+
 @app.post("/heygen/token")
 async def heygen_token():
+    """
+    Mint AND START a Streaming v2 session in one call.
+    Returns { code, data: { session_id, url, access_token, ... }, started: true }
+    """
     if not HEYGEN_API_KEY:
         raise HTTPException(500, "HEYGEN_API_KEY missing")
 
     AVATAR_ID = os.getenv("HEYGEN_AVATAR_ID")
+    if not AVATAR_ID:
+        raise HTTPException(500, "HEYGEN_AVATAR_ID missing")
 
-    url = f"{HEYGEN_BASE}/streaming.new"
+    new_url = f"{HEYGEN_BASE}/streaming.new"
+    start_url = f"{HEYGEN_BASE}/streaming.start"
     headers = {
         "X-Api-Key": HEYGEN_API_KEY,
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    payload = {
-        "avatar_id": AVATAR_ID,   # interactive avatar
+    new_body = {
+        "avatar_id": AVATAR_ID,   # ensure Alessandra (or whichever avatar_id you set)
         "quality": "high",
         "version": "v2",          # LiveKit flow
     }
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.post(url, headers=headers, json=payload)
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        # 1) Mint
+        r_new = await client.post(new_url, headers=headers, json=new_body)
+        j_new = _ok_json_or_raise(r_new)
+        d = j_new.get("data") or j_new  # tolerate both shapes
+        session_id = d.get("session_id")
+        if not session_id:
+            raise HTTPException(502, "streaming.new did not return session_id")
 
+        # 2) Start (idempotent handling)
+        r_start = await client.post(start_url, headers=headers, json={"session_id": session_id})
+        if r_start.status_code != 200:
+            # If already started or similar, treat as OK if message implies that.
+            msg = r_start.text.lower()
+            if "already" not in msg and "started" not in msg:
+                # hard fail
+                raise HTTPException(r_start.status_code, r_start.text)
+
+        # Combine: return the original "data" (includes url + access_token) plus flag
+        out = {"code": j_new.get("code", 100), "data": d, "started": True}
+        return out
+
+@app.post("/heygen/start")
+async def heygen_start(payload: dict):
+    """
+    Compatibility endpoint: Start a session explicitly.
+    Safe to call multiple times; 'already started' is treated as OK.
+    """
+    if not HEYGEN_API_KEY:
+        raise HTTPException(500, "HEYGEN_API_KEY missing")
+    session_id = (payload or {}).get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+
+    url = f"{HEYGEN_BASE}/streaming.start"
+    headers = {
+        "X-Api-Key": HEYGEN_API_KEY,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(url, headers=headers, json={"session_id": session_id})
     if r.status_code != 200:
-        raise HTTPException(r.status_code, f"heygen error: {r.text}")
-
-    try:
-        data = r.json()
-    except Exception:
-        raise HTTPException(502, f"heygen ok but non-JSON body: {r.text[:500]}")
-
-    return data
+        msg = r.text.lower()
+        if "already" not in msg and "started" not in msg:
+            return Response(content=r.content, status_code=r.status_code,
+                            media_type=r.headers.get("content-type","application/json"))
+    return {"ok": True, "session_id": session_id, "started": True}
 
 @app.api_route("/heygen/proxy/{subpath:path}", methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"], tags=["public"])
 async def heygen_proxy(subpath: str, request: Request):
@@ -382,7 +433,7 @@ async def heygen_say(payload: dict):
     if not session_id or not text:
         raise HTTPException(status_code=400, detail="session_id and text required")
 
-    url = "https://api.heygen.com/v1/streaming.task"
+    url = f"{HEYGEN_BASE}/streaming.task"
     headers = {
         "Authorization": f"Bearer {HEYGEN_API_KEY}",
         "Content-Type": "application/json",
@@ -587,280 +638,11 @@ def export_courses_csv():
         ])
     return Response(content=output.getvalue(), media_type="text/csv")
 
-# =========================
-# Email Notification Config
-# =========================
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
-SMTP_USER = os.getenv("SMTP_USER", "tommytam2012@gmail.com")
-SMTP_PASS = os.getenv("SMTP_PASS")  # <-- Gmail App Password (set in Render)
-SMTP_TO   = os.getenv("SMTP_TO", "tommytam2012@gmail.com")  # where notifications go
-
-def send_enroll_email(name: str, email: str, phone: str, notes: str):
-    """
-    Sends a one-way notification email to the school admin inbox.
-    Fails silently if SMTP_PASS is not configured to avoid breaking the API.
-    """
-    if not SMTP_PASS:
-        return
-
-    msg = EmailMessage()
-    msg["Subject"] = f"新入学申请通知 - {name}"
-    msg["From"] = SMTP_USER
-    msg["To"] = SMTP_TO
-    msg["Reply-To"] = email or SMTP_USER
-    body = (
-        f"您有新的入学申请：\n\n"
-        f"学生姓名：{name}\n"
-        f"电邮：{email or '-'}\n"
-        f"电话：{phone or '-'}\n"
-        f"想选修课程：{notes or '-'}\n\n"
-        f"此邮件由系统自动发送。"
-    )
-    msg.set_content(body)
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context) as server:
-        server.login(SMTP_USER, SMTP_PASS)
-        server.send_message(msg)
-
-# --- Enrollment ---
-class EnrollmentIn(BaseModel):
-    full_name: Optional[str] = None
-    name: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    program_code: Optional[str] = None
-    cohort_code: Optional[str] = None
-    timezone: Optional[str] = None
-    notes: Optional[str] = None
-    source: Optional[str] = Field(default="web", description="Where this came from (web/journal/etc)")
-    course_id: Optional[int] = Field(None, description="Selected course ID from drop-down")
-
-@app.post("/enroll", tags=["enroll"])
-def enroll(data: EnrollmentIn, background_tasks: BackgroundTasks):
-    full_name_val = (data.full_name or data.name or "").strip()
-    if not full_name_val:
-        raise HTTPException(status_code=422, detail="full_name or name is required")
-
-    with get_db() as conn:
-        # Determine which course to enroll into:
-        # 1) If course_id provided, use that
-        # 2) else fallback to latest course
-        if data.course_id:
-            row = conn.execute(
-                "SELECT id, seats FROM courses WHERE id = ?",
-                (int(data.course_id),),
-            ).fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Selected course not found")
-        else:
-            row = conn.execute(
-                "SELECT id, seats FROM courses ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="No course available")
-
-        current_seats = int(row["seats"] or 0)
-        if current_seats <= 0:
-            return {"ok": False, "message": "Sorry, this course is full."}
-
-        # deduct seat (guard against negative)
-        updated = conn.execute(
-            "UPDATE courses SET seats = seats - 1 WHERE id = ? AND seats > 0",
-            (row["id"],),
-        )
-        if updated.rowcount == 0:
-            return {"ok": False, "message": "Sorry, this course just sold out."}
-
-        # record enrollment
-        conn.execute(
-            """
-            INSERT INTO enrollments
-              (full_name, email, phone, program_code, cohort_code, timezone, notes, source, course_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                full_name_val,
-                data.email,
-                data.phone,
-                data.program_code,
-                data.cohort_code,
-                data.timezone,
-                data.notes,
-                data.source,
-                int(row["id"]),
-            ),
-        )
-        conn.commit()
-
-    # queue admin email after successful DB ops
-    background_tasks.add_task(
-        send_enroll_email,
-        full_name_val,
-        data.email or "",
-        data.phone or "",
-        data.notes or ""
-    )
-
-    return {"ok": True, "message": "Enrollment confirmed. Seat deducted.", "course_id": int(row["id"])}
-
-@app.get("/enrollments/recent", dependencies=[Security(require_admin)], tags=["admin"])
-def recent_enrollments(
-    limit: int = Query(10, ge=1, le=100),
-    source: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    sql = (
-        """
-      SELECT id, full_name, email, phone, program_code, cohort_code, timezone, notes, source, course_id, created_at
-      FROM enrollments
-        """
-    )
-    params: List[Any] = []
-    if source:
-        sql += " WHERE source = ?"
-        params.append(source)
-    sql += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
-
-    with get_db() as conn:
-        rows = conn.execute(sql, tuple(params)).fetchall()
-        return [dict(r) for r in rows]
-
-# --- Assistant: TAEASLA rule-based answers (DB-only, no KB) ---
-class UserQuery(BaseModel):
-    text: str
-
-def _latest_course_summary() -> str:
-    with get_db() as conn:
-        row: Optional[Row] = conn.execute(
-            """
-            SELECT name, fee, start_date, end_date, time, venue, seats
-            FROM courses
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-    if not row:
-        return "We currently have no courses listed."
-    parts = [f"Latest course: {row['name']}, fee {row['fee']}."]
-    if row["start_date"] and row["end_date"]:
-        parts.append(f"Runs {row['start_date']} to {row['end_date']}.")
-    if row["time"]:
-        parts.append(f"Time: {tts_friendly_time(str(row['time']))}.")
-    if row["venue"]:
-        parts.append(f"Venue: {row['venue']}.")
-    if "seats" in row.keys() and row["seats"] is not None and int(row["seats"]) > 0:
-        parts.append(f"Seats left: {int(row['seats'])}.")
-    return " ".join(parts)
-
-def _taeasla_answer_from_db(q: str) -> str:
-    ql = (q or "").strip().lower()
-
-    # Forbidden topics
-    if "ielts" in ql:
-        return "I can only answer TAEASLA questions. I don't have information about IELTS."
-
-    # Keyword coverage (EN + common Chinese terms)
-    fee_words = ("fee", "price", "cost", "tuition", "學費", "費用", "幾多錢", "幾錢")
-    sched_words = ("schedule", "time", "timetable", "summer", "spring", "fall", "winter", "時間", "時間表", "時段", "上課時間", "暑期", "夏天")
-    course_words = ("course", "courses", "class", "classes", "課程", "班")
-    enroll_words = ("enroll", "enrol", "sign up", "報名", "登記", "註冊")
-
-    if not any(w in ql for w in (fee_words + sched_words + course_words + enroll_words)):
-        return "I can only answer TAEASLA-related questions such as fees, schedule, or courses."
-
-    # Fees
-    if any(w in ql for w in fee_words):
-        try:
-            gi = get_fees("GI")
-            return f"{gi['program']} costs {gi['currency']} {gi['fee']}."
-        except Exception:
-            pass
-        try:
-            hk = get_fees("HKDSE")
-            return f"{hk['program']} costs {hk['currency']} {hk['fee']}."
-        except Exception:
-            return "I don't know the answer to that."
-
-    # Schedule (season detection; default to summer)
-    if any(w in ql for w in sched_words):
-        season = "summer"
-        for s in ("summer", "spring", "fall", "winter", "暑期", "夏天"):
-            if s in ql:
-                season = "summer" if s in ("暑期", "夏天") else s
-                break
-        try:
-            s = schedule(season=season)
-            if s:
-                d = s[0]
-                days = ", ".join(d.get("days", [])) if isinstance(d.get("days"), list) else d.get("days")
-                time_str = d.get("time")
-                time_part = f", time: {tts_friendly_time(str(time_str))}" if time_str else ""
-                return f"{d['course']}: {d['weeks']} weeks, days: {days}{time_part}."
-            return "I don't know the answer to that."
-        except Exception:
-            return "I don't know the answer to that."
-
-    # Courses
-    if any(w in ql for w in course_words):
-        return _latest_course_summary()
-
-    # Enrollment
-    if any(w in ql for w in enroll_words):
-        return "You can enroll online."
-
-    # Fallback
-    return "I don't know the answer to that."
-
-def _is_yes(q: str) -> bool:
-    ql = (q or "").strip().lower()
-    yes_words = {"yes","yeah","yep","ok","okay","sure","please","好的","要","係","係呀","好","是","行","可以"}
-    return any(w == ql or w in ql for w in yes_words)
-
-def _is_no(q: str) -> bool:
-    ql = (q or "").strip().lower()
-    no_words = {"no","nope","nah","not now","不用","唔要","唔使","不要","否","先唔好"}
-    return any(w == ql or w in ql for w in no_words)
-
-@app.post("/assistant/answer")
-def assistant_answer(payload: UserQuery):
-    user_text = (payload.text or "").strip()
-
-    # Rule 7/8: yes/no fast-path
-    if _is_yes(user_text):
-        return {
-            "reply": "Please click the enrollment form link.",
-            "enroll_link": ENROLL_LINK
-        }
-    if _is_no(user_text):
-        return {
-            "reply": "Okay, let me know if you have more questions."
-        }
-
-    # Normal answering path (rules 2–6, 9–13)
-    base = _taeasla_answer_from_db(user_text)
-
-    # Enforce brevity
-    if len(base) > 250:
-        base = base[:247] + "..."
-
-    # Always append the enrollment question
-    reply = f"{base} Would you like to enroll?"
-
-    return {
-        "reply": reply,
-        "enroll_hint": f"If yes, please click the enrollment form link: {ENROLL_LINK}",
-        "rules": "TAEASLA hard rules enforced"
-    }
 # ============================
 # === A L E S S A N D R A  ===
 # ===  Smoke-test endpoints ===
 # ============================
 
-from typing import Optional
-
-# Quick health/round-trip check from browser → our backend.
 @app.get("/hotel/ping")
 def hotel_ping(who: str = "guest"):
     """
@@ -923,7 +705,8 @@ async def heygen_list_interactive(q: Optional[str] = None):
         ql = q.lower()
         slim = [row for row in slim if (row.get("avatar_name") or "").lower().find(ql) >= 0]
 
-    return {"ok": True, "count": len(slim), "avatars": slim} 
+    return {"ok": True, "count": len(slim), "avatars": slim}
+
 # --- Simple SSE/streaming example (placeholder) ---
 @app.get("/stream")
 def stream():
@@ -933,35 +716,7 @@ def stream():
         yield b"data: world\n\n"
     return StreamingResponse(gen(), media_type="text/event-stream")
 
-# For local dev
-# Start a streaming session so LiveKit room exists
-# --- Mint LiveKit creds for Streaming v2 (forces Alessandra) ---
-@app.post("/heygen/token")
-async def heygen_token():
-    if not HEYGEN_API_KEY:
-        raise HTTPException(500, "HEYGEN_API_KEY missing")
-    avatar_id = os.getenv("HEYGEN_AVATAR_ID")
-    if not avatar_id:
-        raise HTTPException(500, "HEYGEN_AVATAR_ID missing")
-
-    url = f"{HEYGEN_BASE}/streaming.new"  # v1 endpoint
-    headers = {
-        "X-Api-Key": HEYGEN_API_KEY,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "avatar_id": avatar_id,   # <-- key line: use Alessandra's ID
-        "quality": "high",
-        "version": "v2"           # LiveKit flow
-    }
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(url, headers=headers, json=body)
-    except Exception as e:
-        raise HTTPException(502, f"heygen token error: {e!s}")
-
-    return Response(content=r.text, status_code=r.status_code, media_type="application/json")
+# --- Local dev entrypoint ---
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
