@@ -20,7 +20,7 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>Alessandra • Streaming Test</h1>
+    <h1>Alessandra • Streaming Test (Professional Look)</h1>
     <p>Order: <b>Start</b> → you should see video/audio, then use <b>Say</b> to make Alessandra speak.</p>
 
     <div class="row">
@@ -30,7 +30,8 @@
     </div>
 
     <div class="row">
-      <input id="sayText" placeholder="What should Alessandra say?" value="Hello from the hotel concierge."/>
+      <input id="sayText" placeholder="What should Alessandra say?" 
+             value="Hello from the hotel concierge in Professional Look."/>
       <select id="mode">
         <option value="talk" selected>talk (LLM)</option>
         <option value="repeat">repeat (echo text)</option>
@@ -52,20 +53,18 @@
     const modeSel = document.getElementById('mode');
 
     let room = null;
-    let session = null; // { session_id, url, access_token, ... }
+    let session = null;
 
     const log = (m)=>{ logEl.textContent += `\n${new Date().toLocaleTimeString()}  ${m}`; logEl.scrollTop = logEl.scrollHeight; };
 
-    /* === start(): mint+start happens on the server; we just connect === */
     async function start() {
       try {
-        // 1) Mint+Start (server does both via /heygen/token)
+        log("Using avatar: Alessandra_ProfessionalLook_public");
         const r = await fetch('/heygen/token', { method:'POST' });
         const j = await r.json();
         log(`token status=${r.status}`);
         log(JSON.stringify(j, null, 2));
 
-        // HeyGen often wraps data under "data"
         const d = j.data || j;
         const wsUrl = d.url;
         const token = d.access_token;
@@ -76,7 +75,6 @@
         }
         session = { session_id, url: wsUrl, access_token: token };
 
-        // 2) Connect to LiveKit immediately (NO /heygen/start)
         room = new LivekitClient.Room();
         room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
           if (track.kind === 'video') track.attach(vid);
@@ -85,7 +83,6 @@
         room.on(LivekitClient.RoomEvent.Disconnected, () => log('Disconnected'));
         await room.connect(wsUrl, token);
         log('Connected to LiveKit. Waiting for remote tracks…');
-
       } catch (e) {
         log('Start error: ' + (e?.message || e));
       }
@@ -96,7 +93,7 @@
         if (!session?.session_id) { log('Start first.'); return; }
         const text = sayText.value.trim();
         if (!text) { log('Enter something to say.'); return; }
-        const task_type = modeSel.value; // "talk" or "repeat"
+        const task_type = modeSel.value;
         const r = await fetch('/heygen/say', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
