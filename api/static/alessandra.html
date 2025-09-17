@@ -30,7 +30,7 @@
     </div>
 
     <div class="row">
-      <input id="sayText" placeholder="What should Alessandra say?" 
+      <input id="sayText" placeholder="What should Alessandra say?"
              value="Hello from the hotel concierge in Professional Look."/>
       <select id="mode">
         <option value="talk" selected>talk (LLM)</option>
@@ -59,7 +59,16 @@
 
     async function start() {
       try {
-        log("Using avatar: Alessandra_ProfessionalLook_public");
+        // Show what the server will use (reads HEYGEN_AVATAR_ID_Alessandra first)
+        try {
+          const idRes = await fetch('/heygen/avatar_id', { cache: 'no-store' });
+          const idJ = await idRes.json();
+          log("Server avatar_id = " + (idJ.avatar_id || 'n/a'));
+        } catch(e) {
+          log('Could not read /heygen/avatar_id (non-fatal).');
+        }
+
+        // Mint + start session (backend sets avatar_id)
         const r = await fetch('/heygen/token', { method:'POST' });
         const j = await r.json();
         log(`token status=${r.status}`);
@@ -75,6 +84,7 @@
         }
         session = { session_id, url: wsUrl, access_token: token };
 
+        // Connect to LiveKit
         room = new LivekitClient.Room();
         room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
           if (track.kind === 'video') track.attach(vid);
@@ -93,7 +103,7 @@
         if (!session?.session_id) { log('Start first.'); return; }
         const text = sayText.value.trim();
         if (!text) { log('Enter something to say.'); return; }
-        const task_type = modeSel.value;
+        const task_type = modeSel.value; // "talk" or "repeat"
         const r = await fetch('/heygen/say', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
