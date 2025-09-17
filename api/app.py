@@ -365,6 +365,39 @@ async def heygen_interrupt(item: InterruptIn):
 
     return {"ok": True, "data": data}
 
+# --- HeyGen: proxy "speak" so the browser never sees your API key ---
+@app.post("/heygen/say")
+async def heygen_say(payload: dict):
+    """
+    Body: { "session_id": "...", "text": "Hello", "task_type": "talk"|"repeat" }
+    Default task_type = "talk" (LLM). Use "repeat" to echo exactly the text.
+    """
+    if not HEYGEN_API_KEY:
+        raise HTTPException(status_code=500, detail="HEYGEN_API_KEY missing")
+
+    session_id = (payload or {}).get("session_id")
+    text = (payload or {}).get("text", "").strip()
+    task_type = (payload or {}).get("task_type", "talk").lower()
+
+    if not session_id or not text:
+        raise HTTPException(status_code=400, detail="session_id and text required")
+
+    url = "https://api.heygen.com/v1/streaming.task"
+    headers = {
+        "Authorization": f"Bearer {HEYGEN_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    data = {"session_id": session_id, "text": text, "task_type": task_type}
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(url, headers=headers, json=data)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"heygen speak error: {e!s}")
+
+    return Response(content=r.text, status_code=r.status_code, media_type="application/json")
+
 # =========================================================
 # ================== COURSES & ENROLLMENT =================
 # =========================================================
