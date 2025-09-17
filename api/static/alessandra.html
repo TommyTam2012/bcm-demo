@@ -11,11 +11,13 @@
     .wrap{max-width:980px;margin:28px auto;padding:20px;background:var(--card);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.35)}
     h1{margin:0 0 12px}
     .row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
-    input,button{border-radius:10px;border:0;padding:10px 12px}
+    input,button,select{border-radius:10px;border:0;padding:10px 12px}
     input{flex:1;min-width:220px;background:#0f1533;color:#eaf0ff}
     button{background:var(--accent);color:#061326;font-weight:700;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
     video{width:100%;max-height:480px;background:#000;border-radius:12px;margin-top:10px}
     .log{background:#0f1533;border-radius:10px;padding:10px;white-space:pre-wrap;word-break:break-word;min-height:90px}
+    small.muted{color:var(--muted)}
   </style>
 </head>
 <body>
@@ -25,18 +27,19 @@
 
     <div class="row">
       <button id="btnStart">Start</button>
-      <button id="btnSay">Say</button>
-      <button id="btnStop">Stop</button>
+      <button id="btnSay" disabled>Say</button>
+      <button id="btnStop" disabled>Stop</button>
     </div>
 
     <div class="row">
       <input id="sayText" placeholder="What should Alessandra say?"
-             value="Hello from the hotel concierge in Professional Look."/>
-      <select id="mode">
-        <option value="talk" selected>talk (LLM)</option>
-        <option value="repeat">repeat (echo text)</option>
+             value="Hello, welcome to Tommy Sir’s hotel."/>
+      <select id="mode" title="talk = LLM; repeat = echo exactly what you type">
+        <option value="repeat" selected>repeat (echo text exactly)</option>
+        <option value="talk">talk (LLM)</option>
       </select>
     </div>
+    <small class="muted">Tip: <b>repeat</b> makes her say exactly your text; use <b>talk</b> only when you want LLM improvisation.</small>
 
     <video id="vid" autoplay playsinline></video>
     <audio id="aud" autoplay></audio>
@@ -46,19 +49,47 @@
   </div>
 
   <script>
-    const logEl = document.getElementById('log');
-    const vid = document.getElementById('vid');
-    const aud = document.getElementById('aud');
+    const logEl   = document.getElementById('log');
+    const vid     = document.getElementById('vid');
+    const aud     = document.getElementById('aud');
     const sayText = document.getElementById('sayText');
     const modeSel = document.getElementById('mode');
+
+    const btnStart = document.getElementById('btnStart');
+    const btnSay   = document.getElementById('btnSay');
+    const btnStop  = document.getElementById('btnStop');
 
     let room = null;
     let session = null;
 
     const log = (m)=>{ logEl.textContent += `\n${new Date().toLocaleTimeString()}  ${m}`; logEl.scrollTop = logEl.scrollHeight; };
 
+    function setButtons(state){
+      // state: 'idle' | 'connecting' | 'connected' | 'stopping'
+      if (state === 'idle') {
+        btnStart.disabled = false;
+        btnSay.disabled   = true;
+        btnStop.disabled  = true;
+      } else if (state === 'connecting') {
+        btnStart.disabled = true;
+        btnSay.disabled   = true;
+        btnStop.disabled  = true;
+      } else if (state === 'connected') {
+        btnStart.disabled = true;
+        btnSay.disabled   = false;
+        btnStop.disabled  = false;
+      } else if (state === 'stopping') {
+        btnStart.disabled = true;
+        btnSay.disabled   = true;
+        btnStop.disabled  = true;
+      }
+    }
+    setButtons('idle');
+
     async function start() {
       try {
+        setButtons('connecting');
+
         // Show what the server will use (reads HEYGEN_AVATAR_ID_Alessandra first)
         try {
           const idRes = await fetch('/heygen/avatar_id', { cache: 'no-store' });
@@ -80,6 +111,7 @@
         const session_id = d.session_id;
         if (!wsUrl || !token || !session_id) {
           log('Missing url/access_token/session_id in /heygen/token response.');
+          setButtons('idle');
           return;
         }
         session = { session_id, url: wsUrl, access_token: token };
@@ -90,20 +122,31 @@
           if (track.kind === 'video') track.attach(vid);
           else if (track.kind === 'audio') track.attach(aud);
         });
-        room.on(LivekitClient.RoomEvent.Disconnected, () => log('Disconnected'));
+        room.on(LivekitClient.RoomEvent.Disconnected, () => {
+          log('Disconnected');
+          setButtons('idle');
+        });
+
         await room.connect(wsUrl, token);
         log('Connected to LiveKit. Waiting for remote tracks…');
+        setButtons('connected');
       } catch (e) {
         log('Start error: ' + (e?.message || e));
+        setButtons('idle');
       }
     }
 
     async function say() {
       try {
-        if (!session?.session_id) { log('Start first.'); return; }
+        if (!session?.session_id || !room || room.state !== 'connected') {
+          log('Start first (not connected).');
+          setButtons('idle');
+          return;
+        }
         const text = sayText.value.trim();
         if (!text) { log('Enter something to say.'); return; }
-        const task_type = modeSel.value; // "talk" or "repeat"
+
+        const task_type = modeSel.value; // "repeat" (default) or "talk"
         const r = await fetch('/heygen/say', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
@@ -118,18 +161,21 @@
 
     async function stop() {
       try {
+        setButtons('stopping');
         if (room) { room.disconnect(); }
         vid.srcObject = null; aud.srcObject = null;
         session = null; room = null;
         log('Stopped.');
+        setButtons('idle');
       } catch (e) {
         log('Stop error: ' + (e?.message || e));
+        setButtons('idle');
       }
     }
 
-    document.getElementById('btnStart').onclick = start;
-    document.getElementById('btnSay').onclick = say;
-    document.getElementById('btnStop').onclick = stop;
+    btnStart.onclick = start;
+    btnSay.onclick   = say;
+    btnStop.onclick  = stop;
   </script>
 </body>
 </html>
