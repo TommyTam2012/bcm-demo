@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Alessandra • LiveKit Smoke Test</title>
+  <title>Alessandra • Concierge Test</title>
   <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
   <style>
     :root{--bg:#0b1020;--card:#121833;--muted:#8ea0c8;--text:#eaf0ff;--accent:#4ea1ff}
@@ -11,36 +11,63 @@
     .wrap{max-width:980px;margin:28px auto;padding:20px;background:var(--card);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.35)}
     h1{margin:0 0 12px}
     .row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
-    input,button,select{border-radius:10px;border:0;padding:10px 12px}
-    input{flex:1;min-width:220px;background:#0f1533;color:#eaf0ff}
+    input,button,select,textarea{border-radius:10px;border:0;padding:10px 12px}
+    input,textarea{flex:1;min-width:220px;background:#0f1533;color:#eaf0ff}
+    textarea{min-height:64px;resize:vertical}
     button{background:var(--accent);color:#061326;font-weight:700;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}
     video{width:100%;max-height:480px;background:#000;border-radius:12px;margin-top:10px}
-    .log{background:#0f1533;border-radius:10px;padding:10px;white-space:pre-wrap;word-break:break-word;min-height:90px}
+    .log{background:#0f1533;border-radius:10px;padding:10px;white-space:pre-wrap;word-break:break-word;min-height:120px}
     small.muted{color:var(--muted)}
+    .pill{font-size:.85rem;border-radius:999px;padding:6px 10px;background:#0f1533}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Alessandra • Streaming Test (Professional Look)</h1>
-    <p>Order: <b>Start</b> → you should see video/audio, then use <b>Say</b> to make Alessandra speak.</p>
+    <h1>Alessandra • Concierge (Professional Look)</h1>
+    <p>Flow: <b>Start</b> → wait for connect → type or <b>hold mic</b> to speak → <b>Say</b> (or mic auto-sends).</p>
 
+    <!-- Controls -->
     <div class="row">
       <button id="btnStart">Start</button>
-      <button id="btnSay" disabled>Say</button>
-      <button id="btnStop" disabled>Stop</button>
+      <button id="btnSay"   disabled>Say</button>
+      <button id="btnPause" disabled>Pause</button>
+      <button id="btnStop"  disabled>Stop</button>
+      <span class="pill" id="micStatus">mic: idle</span>
     </div>
 
+    <!-- Prompt presets for Tommy Sir’s 深圳度假村 -->
     <div class="row">
-      <input id="sayText" placeholder="What should Alessandra say?"
-             value="Hello, welcome to Tommy Sir’s hotel."/>
+      <select id="preset">
+        <option value="">— Choose a concierge question (test) —</option>
+        <option>What are the check-in and check-out times at Tommy Sir’s Shenzhen Resort?</option>
+        <option>What facilities and amenities do you offer at the resort?</option>
+        <option>What are the pool hours? Is there a gym or spa?</option>
+        <option>Do you have multilingual concierge or 24/7 AI support?</option>
+        <option>How can I book an airport transfer to the resort?</option>
+        <option>Which dining options are available and do I need reservations?</option>
+        <option>Can you recommend family activities nearby the resort?</option>
+      </select>
+      <button id="btnAskPreset" disabled>Ask</button>
+    </div>
+
+    <!-- Text input + mode -->
+    <div class="row">
+      <textarea id="sayText" placeholder="Type a message or hold the mic to speak…">Hello, welcome to Tommy Sir’s Shenzhen Resort.</textarea>
       <select id="mode" title="talk = LLM; repeat = echo exactly what you type">
-        <option value="repeat" selected>repeat (echo text exactly)</option>
-        <option value="talk">talk (LLM)</option>
+        <option value="repeat">repeat (echo text exactly)</option>
+        <option value="talk" selected>talk (LLM)</option>
       </select>
     </div>
-    <small class="muted">Tip: <b>repeat</b> makes her say exactly your text; use <b>talk</b> only when you want LLM improvisation.</small>
+    <small class="muted">Tip: use <b>repeat</b> for exact wording; use <b>talk</b> if you want LLM answers.</small>
 
+    <!-- Hold-to-speak mic -->
+    <div class="row">
+      <button id="btnHoldMic" disabled>🎙️ Hold to speak</button>
+      <button id="btnCancelMic" disabled>Cancel</button>
+    </div>
+
+    <!-- Media -->
     <video id="vid" autoplay playsinline></video>
     <audio id="aud" autoplay></audio>
 
@@ -49,57 +76,88 @@
   </div>
 
   <script>
+    // Elements
     const logEl   = document.getElementById('log');
     const vid     = document.getElementById('vid');
     const aud     = document.getElementById('aud');
-    const sayText = document.getElementById('sayText');
-    const modeSel = document.getElementById('mode');
 
-    const btnStart = document.getElementById('btnStart');
-    const btnSay   = document.getElementById('btnSay');
-    const btnStop  = document.getElementById('btnStop');
+    const btnStart   = document.getElementById('btnStart');
+    const btnSay     = document.getElementById('btnSay');
+    const btnPause   = document.getElementById('btnPause');
+    const btnStop    = document.getElementById('btnStop');
 
+    const btnHoldMic   = document.getElementById('btnHoldMic');
+    const btnCancelMic = document.getElementById('btnCancelMic');
+    const micStatus    = document.getElementById('micStatus');
+
+    const sayText  = document.getElementById('sayText');
+    const modeSel  = document.getElementById('mode');
+    const preset   = document.getElementById('preset');
+    const btnAskPreset = document.getElementById('btnAskPreset');
+
+    // State
     let room = null;
     let session = null;
+    let recognition = null;
+    let recognizing = false;
 
+    // Logger
     const log = (m)=>{ logEl.textContent += `\n${new Date().toLocaleTimeString()}  ${m}`; logEl.scrollTop = logEl.scrollHeight; };
 
+    // Buttons state machine
     function setButtons(state){
       // state: 'idle' | 'connecting' | 'connected' | 'stopping'
       if (state === 'idle') {
         btnStart.disabled = false;
         btnSay.disabled   = true;
+        btnPause.disabled = true;
         btnStop.disabled  = true;
+        btnHoldMic.disabled = true;
+        btnCancelMic.disabled = true;
+        btnAskPreset.disabled = true;
       } else if (state === 'connecting') {
         btnStart.disabled = true;
         btnSay.disabled   = true;
+        btnPause.disabled = true;
         btnStop.disabled  = true;
+        btnHoldMic.disabled = true;
+        btnCancelMic.disabled = true;
+        btnAskPreset.disabled = true;
       } else if (state === 'connected') {
         btnStart.disabled = true;
         btnSay.disabled   = false;
+        btnPause.disabled = false;
         btnStop.disabled  = false;
+        btnHoldMic.disabled = false;
+        btnCancelMic.disabled = false;
+        btnAskPreset.disabled = false;
       } else if (state === 'stopping') {
         btnStart.disabled = true;
         btnSay.disabled   = true;
+        btnPause.disabled = true;
         btnStop.disabled  = true;
+        btnHoldMic.disabled = true;
+        btnCancelMic.disabled = true;
+        btnAskPreset.disabled = true;
       }
     }
     setButtons('idle');
 
+    // LiveKit connect helpers
     async function start() {
       try {
         setButtons('connecting');
 
-        // Show what the server will use (reads HEYGEN_AVATAR_ID_Alessandra first)
+        // Show server avatar for sanity
         try {
           const idRes = await fetch('/heygen/avatar_id', { cache: 'no-store' });
           const idJ = await idRes.json();
           log("Server avatar_id = " + (idJ.avatar_id || 'n/a'));
-        } catch(e) {
+        } catch (e) {
           log('Could not read /heygen/avatar_id (non-fatal).');
         }
 
-        // Mint + start session (backend sets avatar_id)
+        // Mint + start HeyGen session (backend pins avatar)
         const r = await fetch('/heygen/token', { method:'POST' });
         const j = await r.json();
         log(`token status=${r.status}`);
@@ -126,42 +184,66 @@
           log('Disconnected');
           setButtons('idle');
         });
-
         await room.connect(wsUrl, token);
         log('Connected to LiveKit. Waiting for remote tracks…');
         setButtons('connected');
+
+        // Auto-intro (repeat → verbatim)
+        await speak("Hi there, I’m Alessandra, your concierge service assistant for Tommy Sir’s Shenzhen Resort, how can I help you today?", "repeat");
+
       } catch (e) {
         log('Start error: ' + (e?.message || e));
         setButtons('idle');
       }
     }
 
+    async function speak(text, task_type) {
+      if (!session?.session_id || !room || room.state !== 'connected') {
+        log('Start first (not connected).');
+        return;
+      }
+      const payload = {
+        session_id: session.session_id,
+        text: String(text || '').trim(),
+        task_type: (task_type || modeSel.value || 'talk')
+      };
+      if (!payload.text) { log('Enter something to say.'); return; }
+      const r = await fetch('/heygen/say', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      log(`say → ${r.status}`);
+      const t = await r.text(); log(t);
+    }
+
     async function say() {
       try {
-        if (!session?.session_id || !room || room.state !== 'connected') {
-          log('Start first (not connected).');
-          setButtons('idle');
-          return;
-        }
-        const text = sayText.value.trim();
-        if (!text) { log('Enter something to say.'); return; }
-
-        const task_type = modeSel.value; // "repeat" (default) or "talk"
-        const r = await fetch('/heygen/say', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ session_id: session.session_id, text, task_type })
-        });
-        log(`say → ${r.status}`);
-        const t = await r.text(); log(t);
+        await speak(sayText.value, modeSel.value);
       } catch (e) {
         log('Say error: ' + (e?.message || e));
       }
     }
 
-    async function stop() {
+    async function pauseSpeech() {
+      try {
+        if (!session?.session_id) { log('No session to pause.'); return; }
+        const r = await fetch('/heygen/interrupt', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ session_id: session.session_id })
+        });
+        log(`pause/interrupt → ${r.status}`);
+        const t = await r.text(); log(t);
+      } catch (e) {
+        log('Pause error: ' + (e?.message || e));
+      }
+    }
+
+    async function stopAll() {
       try {
         setButtons('stopping');
+        if (recognizing) stopMic();
         if (room) { room.disconnect(); }
         vid.srcObject = null; aud.srcObject = null;
         session = null; room = null;
@@ -173,9 +255,95 @@
       }
     }
 
-    btnStart.onclick = start;
-    btnSay.onclick   = say;
-    btnStop.onclick  = stop;
+    // Preset handler
+    async function askPreset() {
+      const q = preset.value.trim();
+      if (!q) return;
+      // For concierge Q&A, default to talk (LLM)
+      await speak(q, 'talk');
+    }
+
+    // ====== Hold-to-speak (Web Speech API STT) ======
+    function ensureSTT(){
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) {
+        log('SpeechRecognition not supported in this browser.');
+        return null;
+      }
+      const rec = new SR();
+      rec.lang = 'en-US';
+      rec.interimResults = true;
+      rec.continuous = true;
+      rec.maxAlternatives = 1;
+      return rec;
+    }
+
+    function startMic() {
+      if (recognition) {
+        try { recognition.stop(); } catch {}
+        recognition = null;
+      }
+      recognition = ensureSTT();
+      if (!recognition) return;
+
+      recognizing = true;
+      micStatus.textContent = 'mic: listening… (hold)';
+      sayText.placeholder = 'Listening… release to send';
+      log('Mic started. Hold the button to keep recording.');
+
+      let finalText = '';
+      recognition.onresult = (e) => {
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const txt = e.results[i][0].transcript;
+          if (e.results[i].isFinal) finalText += txt + ' ';
+          else interim += txt;
+        }
+        sayText.value = (finalText + interim).trim();
+      };
+      recognition.onerror = (e) => log('STT error: ' + (e?.error || e));
+      recognition.onend = () => { /* we end on mouseup */ };
+
+      try { recognition.start(); } catch (e) { log('STT start error: ' + (e?.message || e)); }
+    }
+
+    async function stopMic(send=true) {
+      if (!recognition) return;
+      try { recognition.stop(); } catch {}
+      recognizing = false;
+      micStatus.textContent = 'mic: idle';
+      sayText.placeholder = 'Type a message or hold the mic to speak…';
+      if (send && sayText.value.trim()) {
+        // Send via talk (LLM) by default for voice
+        await speak(sayText.value.trim(), 'talk');
+      }
+    }
+
+    function cancelMic() {
+      stopMic(false);
+      log('Mic canceled; text not sent.');
+    }
+
+    // Mouse/Touch events for Hold-to-speak
+    function wireHoldToSpeak(btn) {
+      // Desktop
+      btn.addEventListener('mousedown', startMic);
+      btn.addEventListener('mouseup',   () => stopMic(true));
+      btn.addEventListener('mouseleave',() => recognizing && stopMic(true));
+      // Mobile
+      btn.addEventListener('touchstart', (e)=>{ e.preventDefault(); startMic(); }, {passive:false});
+      btn.addEventListener('touchend',   (e)=>{ e.preventDefault(); stopMic(true); }, {passive:false});
+      btn.addEventListener('touchcancel',(e)=>{ e.preventDefault(); stopMic(true); }, {passive:false});
+    }
+    wireHoldToSpeak(btnHoldMic);
+
+    // Wire buttons
+    btnStart.onclick    = start;
+    btnSay.onclick      = say;
+    btnPause.onclick    = pauseSpeech;
+    btnStop.onclick     = stopAll;
+    btnAskPreset.onclick = askPreset;
+    btnCancelMic.onclick = cancelMic;
   </script>
 </body>
 </html>
