@@ -935,29 +935,32 @@ def stream():
 
 # For local dev
 # Start a streaming session so LiveKit room exists
-@app.post("/heygen/start")
-async def heygen_start(payload: dict):
+# --- Mint LiveKit creds for Streaming v2 (forces Alessandra) ---
+@app.post("/heygen/token")
+async def heygen_token():
     if not HEYGEN_API_KEY:
         raise HTTPException(500, "HEYGEN_API_KEY missing")
+    avatar_id = os.getenv("HEYGEN_AVATAR_ID")
+    if not avatar_id:
+        raise HTTPException(500, "HEYGEN_AVATAR_ID missing")
 
-    session_id = (payload or {}).get("session_id")
-    if not session_id:
-        raise HTTPException(400, "session_id required")
-
-    url = f"{HEYGEN_BASE}/streaming.start"  # v1
+    url = f"{HEYGEN_BASE}/streaming.new"  # v1 endpoint
     headers = {
         "X-Api-Key": HEYGEN_API_KEY,
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    data = { "session_id": session_id }
+    body = {
+        "avatar_id": avatar_id,   # <-- key line: use Alessandra's ID
+        "quality": "high",
+        "version": "v2"           # LiveKit flow
+    }
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(url, headers=headers, json=data)
+            r = await client.post(url, headers=headers, json=body)
     except Exception as e:
-        raise HTTPException(502, f"heygen start error: {e!s}")
+        raise HTTPException(502, f"heygen token error: {e!s}")
 
-    # Bubble HeyGen response back (usually {"code":100,"message":"success",...})
     return Response(content=r.text, status_code=r.status_code, media_type="application/json")
 if __name__ == "__main__":
     import uvicorn
