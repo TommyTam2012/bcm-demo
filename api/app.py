@@ -47,7 +47,7 @@ DB_PATH = str(PERSIST_DB if PERSIST_DB.exists() or DATA_DIR.is_dir() else LEGACY
 
 app = FastAPI(
     title="TAEASLA API",
-    version="1.7.0",
+    version="1.7.1",
     description="TAEASLA backend: courses, enrollments, fees, schedules, HeyGen proxy, and email alerts.",
 )
 
@@ -286,6 +286,20 @@ def _ok_json_or_raise(r: httpx.Response):
             raise HTTPException(502, f"Non-JSON body from HeyGen: {r.text[:500]}")
     raise HTTPException(r.status_code, r.text)
 
+# NEW: single source of truth for avatar_id precedence
+def _get_avatar_id() -> str:
+    """
+    Precedence:
+      1) HEYGEN_AVATAR_ID_Alessandra
+      2) HEYGEN_AVATAR_ID
+      3) default "Alessandra_ProfessionalLook_public"
+    """
+    return (
+        os.getenv("HEYGEN_AVATAR_ID_Alessandra")
+        or os.getenv("HEYGEN_AVATAR_ID")
+        or "Alessandra_ProfessionalLook_public"
+    )
+
 @app.post("/heygen/token")
 async def heygen_token():
     """
@@ -295,9 +309,7 @@ async def heygen_token():
     if not HEYGEN_API_KEY:
         raise HTTPException(500, "HEYGEN_API_KEY missing")
 
-    AVATAR_ID = os.getenv("HEYGEN_AVATAR_ID")
-    if not AVATAR_ID:
-        raise HTTPException(500, "HEYGEN_AVATAR_ID missing")
+    AVATAR_ID = _get_avatar_id()
 
     new_url = f"{HEYGEN_BASE}/streaming.new"
     start_url = f"{HEYGEN_BASE}/streaming.start"
@@ -449,195 +461,6 @@ async def heygen_say(payload: dict):
 
     return Response(content=r.text, status_code=r.status_code, media_type="application/json")
 
-# =========================================================
-# ================== COURSES & ENROLLMENT =================
-# =========================================================
-class CourseIn(BaseModel):
-    name: str = Field(..., description="Course name (displayed in Chinese for BCM drop-down)")
-    fee: float = Field(..., description="Fee amount (numeric)")
-    start_date: Optional[str] = Field(None, description="YYYY-MM-DD")
-    end_date: Optional[str] = Field(None, description="YYYY-MM-DD")
-    time: Optional[str] = Field(None, description="e.g., Mon/Wed/Fri 7–9pm")
-    venue: Optional[str] = Field(None, description="Room / Center")
-    seats: Optional[int] = Field(0, ge=0, description="Seats remaining (defaults to 0)")
-
-# --- TTS helper: normalize compact time strings for clear speech ---
-def tts_friendly_time(s: str) -> str:
-    """
-    Normalize compact time strings for TTS, e.g.:
-    'Mon/Wed/Fri 7–9pm' -> 'Monday, Wednesday, Friday 7 to 9 pm'
-    """
-    if not s:
-        return ""
-    t = s.strip()
-
-    # Expand day abbreviations and make lists readable
-    day_map = {
-        "Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday",
-        "Thu": "Thursday", "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday",
-    }
-    t = t.replace("/", ", ")
-    for abbr, full in day_map.items():
-        t = re.sub(rf"\b{abbr}\b", full, t)
-
-    def _range_repl(m):
-        start = m.group(1)
-        end = m.group(2)
-        ampm = (m.group(3) or "").replace(".", "").lower().strip()
-        if ampm in ("am", "pm"):
-            return f"{start} {ampm} to {end} {ampm}"
-        return f"{start} to {end}"
-
-    t = re.sub(
-        r"(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*(a\.?m\.?|p\.?m\.?|am|pm)?",
-        _range_repl,
-        t,
-        flags=re.I,
-    )
-    t = re.sub(r"(\d)(am|pm)\b", r"\1 \2", t, flags=re.I)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-# -------------------- ADMIN: add/list/delete/export --------------------
-@app.post("/admin/courses", dependencies=[Security(require_admin)], tags=["admin"])
-def admin_add_course(course: CourseIn):
-    return add_course(course)
-
-@app.post("/courses", dependencies=[Security(require_admin)], tags=["courses"])
-def add_course(course: CourseIn):
-    with get_db() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO courses (name, fee, start_date, end_date, time, venue, seats)
-            VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0))
-            """,
-            (course.name, course.fee, course.start_date, course.end_date, course.time, course.venue, course.seats),
-        )
-        course_id = cur.lastrowid
-        row = conn.execute(
-            """
-            SELECT id, name, fee, start_date, end_date, time, venue, seats
-            FROM courses WHERE id = ?
-            """,
-            (course_id,),
-        ).fetchone()
-        conn.commit()
-        return dict(row)
-
-@app.get("/courses")
-def list_courses() -> List[Dict[str, Any]]:
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, name, fee, start_date, end_date, time, venue, seats
-            FROM courses ORDER BY id DESC
-            """
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-class SeedResult(BaseModel):
-    seeded: int
-    reset: bool
-
-@app.post("/courses/seed", response_model=SeedResult, dependencies=[Security(require_admin)], tags=["courses"])
-def seed_courses(reset: bool = Query(True, description="If true, clears and reseeds")):
-    """
-    Seed the course catalog in Chinese for BCM drop-down.
-    You can re-run from Swagger. If reset=True, clears the table first.
-    """
-    with get_db() as conn:
-        if reset:
-            conn.execute("DELETE FROM courses")
-        count = 0
-        for (name_zh, fee, seats) in BCM_SEED:
-            conn.execute(
-                """
-                INSERT INTO courses (name, fee, start_date, end_date, time, venue, seats)
-                VALUES (?, ?, NULL, NULL, NULL, NULL, ?)
-                """,
-                (name_zh, float(fee), int(seats)),
-            )
-            count += 1
-        conn.commit()
-    return SeedResult(seeded=count, reset=bool(reset))
-
-@app.get("/courses/options", tags=["courses"])
-def course_options() -> List[Dict[str, Any]]:
-    """
-    Minimal payload for front-end drop-down:
-    [{ id, name, seats }]
-    """
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, name, seats FROM courses ORDER BY id ASC"
-        ).fetchall()
-        return [{"id": r["id"], "name": r["name"], "seats": int(r["seats"] or 0)} for r in rows]
-
-@app.get("/courses/summary")
-def courses_summary():
-    with get_db() as conn:
-        row = conn.execute(
-            """
-            SELECT name, fee, start_date, end_date, time, venue, seats
-            FROM courses
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-    if not row:
-        return {"summary": "We currently have no courses listed."}
-    parts = [f"Latest course: {row['name']}, fee {row['fee']}."]
-    if row["start_date"] and row["end_date"]:
-        parts.append(f"Runs {row['start_date']} to {row['end_date']}.")
-    if row["time"]:
-        parts.append(f"Time: {tts_friendly_time(str(row['time']))}.")
-    if row["venue"]:
-        parts.append(f"Venue: {row['venue']}.")
-    if "seats" in row.keys() and row["seats"] is not None and int(row["seats"]) > 0:
-        parts.append(f"Seats left: {int(row['seats'])}.")
-    return {"summary": " ".join(parts)}
-
-@app.get("/courses/{course_id}")
-def get_course(course_id: int) -> Dict[str, Any]:
-    with get_db() as conn:
-        row = conn.execute(
-            """
-            SELECT id, name, fee, start_date, end_date, time, venue, seats
-            FROM courses WHERE id = ?
-            """,
-            (course_id,),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Course not found")
-        return dict(row)
-
-@app.delete("/courses/{course_id}", dependencies=[Security(require_admin)], tags=["admin"])
-def delete_course(course_id: int):
-    with get_db() as conn:
-        cur = conn.execute("DELETE FROM courses WHERE id = ?", (course_id,))
-        conn.commit()
-        if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Course not found")
-        return {"ok": True, "deleted": course_id}
-
-@app.get("/courses/export.csv")
-def export_courses_csv():
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, name, fee, start_date, end_date, time, venue, seats
-            FROM courses ORDER BY id DESC
-            """
-        ).fetchall()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["id", "name", "fee", "start_date", "end_date", "time", "venue", "seats"])
-    for r in rows:
-        writer.writerow([
-            r["id"], r["name"], r["fee"], r["start_date"], r["end_date"], r["time"], r["venue"], r.get("seats", 0),
-        ])
-    return Response(content=output.getvalue(), media_type="text/csv")
-
 # ============================
 # === A L E S S A N D R A  ===
 # ===  Smoke-test endpoints ===
@@ -657,7 +480,7 @@ def heygen_avatar_id():
     Shows which avatar_id the server will use when minting a streaming session.
     We keep the real API key server-side; the browser only sees this ID (safe).
     """
-    return {"avatar_id": os.getenv("HEYGEN_AVATAR_ID") or None}
+    return {"avatar_id": _get_avatar_id()}
 
 @app.get("/heygen/avatars/interactive")
 async def heygen_list_interactive(q: Optional[str] = None):
