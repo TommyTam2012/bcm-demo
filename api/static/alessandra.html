@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Alessandra SDK Smoke Test</title>
+  <style>
+    :root{--bg:#0b1020;--card:#121833;--muted:#8ea0c8;--text:#eaf0ff;--accent:#4ea1ff}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Inter,Arial}
+    .wrap{max-width:920px;margin:32px auto;padding:24px;background:var(--card);border-radius:16px;box-shadow:0 6px 30px rgba(0,0,0,.3)}
+    h1{margin:0 0 12px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}
+    button{background:var(--accent);color:#061326;border:0;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer}
+    pre{background:#0f1533;padding:12px;border-radius:10px;white-space:pre-wrap;word-break:break-word}
+    .ok{color:#9be380}.err{color:#ff7b7b}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Alessandra • Streaming SDK Smoke Test</h1>
+    <p>This page proves 3 things: (1) Alessandra’s <code>avatar_id</code> is configured, (2) we can mint a streaming token via our backend, (3) the page can call our hotel endpoint.</p>
+
+    <div class="row">
+      <button id="btn-id">1) Show avatar_id</button>
+      <button id="btn-token">2) Get HeyGen token</button>
+      <button id="btn-ping">3) Call /hotel/ping</button>
+    </div>
+
+    <h3>Status</h3>
+    <pre id="log">ready…</pre>
+
+    <h3>Next step (optional, after token works)</h3>
+    <p>Wire the Streaming SDK to join the session using the token returned below. We’ll do that after we confirm the token comes back 200 OK.</p>
+  </div>
+
+  <script>
+    const $log = document.getElementById('log');
+    const log = (msg, type='') => {
+      const t = new Date().toLocaleTimeString();
+      $log.textContent += `\n[${t}] ${msg}`;
+      $log.scrollTop = $log.scrollHeight;
+    };
+
+    document.getElementById('btn-id').onclick = async () => {
+      try {
+        const r = await fetch('/heygen/avatar_id');
+        const j = await r.json();
+        if (!j.avatar_id) return log('No HEYGEN_AVATAR_ID configured on server.', 'err');
+        log('avatar_id = ' + j.avatar_id, 'ok');
+      } catch (e) {
+        log('Error reading avatar_id: ' + (e?.message || e), 'err');
+      }
+    };
+
+    document.getElementById('btn-token').onclick = async () => {
+      try {
+        const r = await fetch('/heygen/token', { method:'POST' });
+        const txt = await r.text();
+        let j = null;
+        try { j = JSON.parse(txt); } catch { /* leave raw */ }
+        if (!r.ok) {
+          log('Token error ['+r.status+']: ' + (j?.message || txt), 'err');
+          return;
+        }
+        log('Token OK. Raw response:\n' + (j ? JSON.stringify(j, null, 2) : txt), 'ok');
+        // NOTE: The response typically includes a session_id and a client token (for LiveKit).
+        // We’ll plug those into the SDK in the next step once confirmed.
+      } catch (e) {
+        log('Token fetch failed: ' + (e?.message || e), 'err');
+      }
+    };
+
+    document.getElementById('btn-ping').onclick = async () => {
+      try {
+        const r = await fetch('/hotel/ping?who=alessandra');
+        const j = await r.json();
+        log('Ping OK: ' + JSON.stringify(j), 'ok');
+      } catch (e) {
+        log('Ping failed: ' + (e?.message || e), 'err');
+      }
+    };
+  </script>
+</body>
+</html>
