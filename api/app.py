@@ -820,7 +820,77 @@ def assistant_answer(payload: UserQuery):
         "enroll_hint": f"If yes, please click the enrollment form link: {ENROLL_LINK}",
         "rules": "TAEASLA hard rules enforced"
     }
+# ============================
+# === A L E S S A N D R A  ===
+# ===  Smoke-test endpoints ===
+# ============================
 
+from typing import Optional
+
+# Quick health/round-trip check from browser → our backend.
+@app.get("/hotel/ping")
+def hotel_ping(who: str = "guest"):
+    """
+    Returns a simple JSON proving the front-end can reach our backend.
+    Example: GET /hotel/ping?who=alessandra
+    """
+    return {"ok": True, "who": who, "ts": int(time.time())}
+
+@app.get("/heygen/avatar_id")
+def heygen_avatar_id():
+    """
+    Shows which avatar_id the server will use when minting a streaming session.
+    We keep the real API key server-side; the browser only sees this ID (safe).
+    """
+    return {"avatar_id": os.getenv("HEYGEN_AVATAR_ID") or None}
+
+@app.get("/heygen/avatars/interactive")
+async def heygen_list_interactive(q: Optional[str] = None):
+    """
+    Lists avatars visible to this account (server-side) and returns a slim list:
+      [{ "avatar_id": "...", "avatar_name": "..." }, ...]
+    Optional filter: /heygen/avatars/interactive?q=alessandra
+    """
+    if not HEYGEN_API_KEY:
+        raise HTTPException(status_code=500, detail="HEYGEN_API_KEY missing")
+
+    V2_BASE = "https://api.heygen.com/v2"
+    url = f"{V2_BASE}/avatars"
+    headers = {
+        "Accept": "application/json",
+        "X-Api-Key": HEYGEN_API_KEY,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, headers=headers)
+    except Exception as e:
+        # Network or timeout
+        raise HTTPException(status_code=502, detail=f"heygen list error: {e!s}")
+
+    if r.status_code != 200:
+        # Bubble up HeyGen's response so we can see auth/permission issues
+        return Response(content=r.text, status_code=r.status_code, media_type="application/json")
+
+    try:
+        j = r.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Invalid JSON from HeyGen /v2/avatars")
+
+    avatars = (j or {}).get("data", {}).get("avatars", []) or []
+    slim = []
+    for a in avatars:
+        name = a.get("avatar_name") or a.get("name")
+        aid = a.get("avatar_id") or a.get("id")
+        if not aid:
+            continue
+        slim.append({"avatar_id": aid, "avatar_name": name})
+
+    if q:
+        ql = q.lower()
+        slim = [row for row in slim if (row.get("avatar_name") or "").lower().find(ql) >= 0]
+
+    return {"ok": True, "count": len(slim), "avatars": slim} 
 # --- Simple SSE/streaming example (placeholder) ---
 @app.get("/stream")
 def stream():
