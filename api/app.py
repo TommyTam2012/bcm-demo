@@ -934,6 +934,31 @@ def stream():
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 # For local dev
+# Start a streaming session so LiveKit room exists
+@app.post("/heygen/start")
+async def heygen_start(payload: dict):
+    if not HEYGEN_API_KEY:
+        raise HTTPException(500, "HEYGEN_API_KEY missing")
+
+    session_id = (payload or {}).get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id required")
+
+    url = f"{HEYGEN_BASE}/streaming.start"  # v1
+    headers = {
+        "X-Api-Key": HEYGEN_API_KEY,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    data = { "session_id": session_id }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(url, headers=headers, json=data)
+    except Exception as e:
+        raise HTTPException(502, f"heygen start error: {e!s}")
+
+    # Bubble HeyGen response back (usually {"code":100,"message":"success",...})
+    return Response(content=r.text, status_code=r.status_code, media_type="application/json")
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
