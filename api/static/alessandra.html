@@ -56,10 +56,10 @@
 
     const log = (m)=>{ logEl.textContent += `\n${new Date().toLocaleTimeString()}  ${m}`; logEl.scrollTop = logEl.scrollHeight; };
 
-    /* === PATCHED start() as requested === */
+    /* === start(): mint+start happens on the server; we just connect === */
     async function start() {
       try {
-        // 1) Mint session (streaming.new)
+        // 1) Mint+Start (server does both via /heygen/token)
         const r = await fetch('/heygen/token', { method:'POST' });
         const j = await r.json();
         log(`token status=${r.status}`);
@@ -76,18 +76,7 @@
         }
         session = { session_id, url: wsUrl, access_token: token };
 
-        // 2) *** IMPORTANT *** Start the session (creates LiveKit room)
-        const s = await fetch('/heygen/start', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ session_id })
-        });
-        const sj = await s.text();
-        log(`start status=${s.status}`);
-        log(sj);
-        if (!s.ok) { log('streaming.start failed; cannot connect.'); return; }
-
-        // 3) Now connect to LiveKit
+        // 2) Connect to LiveKit immediately (NO /heygen/start)
         room = new LivekitClient.Room();
         room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
           if (track.kind === 'video') track.attach(vid);
