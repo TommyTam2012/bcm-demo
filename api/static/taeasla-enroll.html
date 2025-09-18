@@ -184,15 +184,7 @@
           const res = await fetch('/enroll', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              course_id,
-              full_name,
-              phone,
-              email,
-              timezone,
-              notes,
-              source: 'web'
-            })
+            body: JSON.stringify({ course_id, full_name, phone, email, timezone, notes, source: 'web' })
           });
           const data = await res.json();
 
@@ -201,7 +193,7 @@
             showBAD(msg);
           } else if (data && data.ok) {
             showOK('報名成功！系統已扣減名額。');
-            await loadCourses();   // refresh seats
+            await loadCourses();
             $form.reset();
             $courseMeta.textContent = '—';
           } else {
