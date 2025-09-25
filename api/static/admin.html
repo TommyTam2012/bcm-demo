@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -38,20 +38,20 @@
 </head>
 <body>
   <h1>TAEASLA 学校报名仪表板</h1>
-  <p>Showing latest 20 sign-ups from the database.</p>
+  <p>显示数据库中最新的 20 条报名记录。</p>
   <table id="enrollTable">
     <thead>
       <tr>
-        <th>ID</th>
-        <th>Full Name</th>
-        <th>Email</th>
-        <th>Phone</th>
-        <th>Program Code</th>
-        <th>Cohort Code</th>
-        <th>Timezone</th>
-        <th>Notes</th>
-        <th>Source</th>
-        <th>Created At</th>
+        <th>编号</th>
+        <th>姓名</th>
+        <th>邮箱</th>
+        <th>电话</th>
+        <th>课程代码</th>
+        <th>班级代码</th>
+        <th>时区</th>
+        <th>备注</th>
+        <th>来源</th>
+        <th>创建时间</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -60,7 +60,7 @@
 
   <script>
     const API_BASE = "https://bcm-demo.onrender.com"; // change if different
-    const ADMIN_KEY = prompt("Enter X-Admin-Key:");
+    const ADMIN_KEY = prompt("请输入 X-Admin-Key：");
 
     async function loadEnrollments() {
       try {
@@ -88,7 +88,7 @@
           tbody.appendChild(tr);
         });
       } catch (err) {
-        document.getElementById("error").textContent = "❌ Failed to load enrollments: " + err;
+        document.getElementById("error").textContent = "❌ 无法加载报名记录: " + err;
       }
     }
 
