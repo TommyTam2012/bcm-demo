@@ -109,6 +109,10 @@ BCM_SEED = [
     ("香港中學文憑試", 0.0, 35),
     ("雅思", 0.0, 35),
     ("托福", 0.0, 35),
+    # --- New courses requested by Capt. Tommy ---
+    ("Children Video Games", 0.0, 35),
+    ("AI Grade 5-12", 0.0, 35),
+    ("TG144 Scrum Master", 0.0, 40),
 ]
 
 def seed_if_empty():
@@ -122,6 +126,7 @@ def seed_if_empty():
                     (name_zh, float(fee), int(seats)),
                 )
             conn.commit()
+
 # --- Startup: ensure schema + auto-seed ----------
 @app.on_event("startup")
 def _startup():
@@ -261,6 +266,7 @@ async def heygen_token():
             raise HTTPException(r_start.status_code, r_start.text)
 
         return {"code": j_new.get("code", 100), "data": d, "started": True}
+
 # =========================================================
 # ================== COURSES & ENROLLMENT =================
 # =========================================================
@@ -436,6 +442,7 @@ def recent_enrollments(limit: int = Query(10, ge=1, le=100)):
             "FROM enrollments ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
 # --- Assistant: TAEASLA rule-based answers ---
 class UserQuery(BaseModel):
     text: str
